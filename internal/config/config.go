@@ -1,17 +1,23 @@
 package config
 
 import (
+	"errors"
 	"flag"
 	"strings"
 
 	"github.com/caarlos0/env/v6"
-	"github.com/paveltovchigrechko/gofrmrkt/internal/apperrors"
 )
 
 const (
 	addressFlag              = "a"
 	databaseDSNFlag          = "d"
 	accrualSystemAddressFlag = "r"
+)
+
+var (
+	errAddrEmpty      = errors.New("server address is empty")
+	errDSNEmpty       = errors.New("database DSN is empty")
+	errAccrualSysAddr = errors.New("accrual system address is empty")
 )
 
 type AppConfig struct {
@@ -40,19 +46,19 @@ func CreateAppConfig(args []string) (*AppConfig, error) {
 	if envCfg.Addr != nil {
 		cfg.Addr = *envCfg.Addr
 	} else if strings.Trim(cfg.Addr, " ") == "" {
-		return nil, apperrors.ErrAddrEmpty
+		return nil, errAddrEmpty
 	}
 
 	if envCfg.URI != nil {
 		cfg.DatabaseURI = *envCfg.URI
 	} else if strings.TrimSpace(cfg.DatabaseURI) == "" {
-		return nil, apperrors.ErrDSNEmpty
+		return nil, errDSNEmpty
 	}
 
 	if envCfg.AccrualSysAddr != nil {
 		cfg.AccrualSysAddr = *envCfg.AccrualSysAddr
 	} else if strings.TrimSpace(cfg.AccrualSysAddr) == "" {
-		return nil, apperrors.ErrAccrualSysAddr
+		return nil, errAccrualSysAddr
 	}
 
 	return cfg, nil
@@ -96,15 +102,15 @@ func parseEnvConfig() (*envConfig, error) {
 
 func validateEnvConfig(cfg *envConfig) error {
 	if cfg.Addr != nil && strings.TrimSpace(*cfg.Addr) == "" {
-		return apperrors.ErrAddrEmpty
+		return errAddrEmpty
 	}
 
 	if cfg.URI != nil && strings.TrimSpace(*cfg.URI) == "" {
-		return apperrors.ErrDSNEmpty
+		return errDSNEmpty
 	}
 
 	if cfg.AccrualSysAddr != nil && strings.TrimSpace(*cfg.AccrualSysAddr) == "" {
-		return apperrors.ErrAccrualSysAddr
+		return errAccrualSysAddr
 	}
 
 	return nil

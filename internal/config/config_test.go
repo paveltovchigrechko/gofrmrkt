@@ -3,7 +3,6 @@ package config
 import (
 	"testing"
 
-	"github.com/paveltovchigrechko/gofrmrkt/internal/apperrors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,7 +85,7 @@ func TestCreateAppConfig_Negative(t *testing.T) {
 		t.Setenv("DATABASE_URI", "db_address")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "accrual_system_address")
 		cfg, err := CreateAppConfig([]string{})
-		assert.ErrorIs(t, err, apperrors.ErrAddrEmpty)
+		assert.ErrorIs(t, err, errAddrEmpty)
 		assert.Nil(t, cfg)
 	})
 
@@ -95,7 +94,7 @@ func TestCreateAppConfig_Negative(t *testing.T) {
 		t.Setenv("DATABASE_URI", "   ")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "accrual_system_address")
 		cfg, err := CreateAppConfig([]string{})
-		assert.ErrorIs(t, err, apperrors.ErrDSNEmpty)
+		assert.ErrorIs(t, err, errDSNEmpty)
 		assert.Nil(t, cfg)
 	})
 
@@ -104,7 +103,7 @@ func TestCreateAppConfig_Negative(t *testing.T) {
 		t.Setenv("DATABASE_URI", "db_address")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", " ")
 		cfg, err := CreateAppConfig([]string{})
-		assert.ErrorIs(t, err, apperrors.ErrAccrualSysAddr)
+		assert.ErrorIs(t, err, errAccrualSysAddr)
 		assert.Nil(t, cfg)
 	})
 }
@@ -180,7 +179,7 @@ func TestParseConfig(t *testing.T) {
 		require.Nil(t, cfg)
 		require.NotNil(t, err)
 
-		assert.ErrorIs(t, err, apperrors.ErrAddrEmpty)
+		assert.ErrorIs(t, err, errAddrEmpty)
 	})
 
 	t.Run("should fail when database URI is empty", func(t *testing.T) {
@@ -192,7 +191,7 @@ func TestParseConfig(t *testing.T) {
 		require.Nil(t, cfg)
 		require.NotNil(t, err)
 
-		assert.ErrorIs(t, err, apperrors.ErrDSNEmpty)
+		assert.ErrorIs(t, err, errDSNEmpty)
 	})
 
 	t.Run("should fail when accrual system address is empty", func(t *testing.T) {
@@ -204,7 +203,7 @@ func TestParseConfig(t *testing.T) {
 		require.Nil(t, cfg)
 		require.NotNil(t, err)
 
-		assert.ErrorIs(t, err, apperrors.ErrAccrualSysAddr)
+		assert.ErrorIs(t, err, errAccrualSysAddr)
 	})
 }
 
@@ -230,7 +229,7 @@ func TestValidateEnvConfig(t *testing.T) {
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
 			},
-			want: apperrors.ErrAddrEmpty,
+			want: errAddrEmpty,
 		},
 		{
 			name: "DSN is an empty string",
@@ -239,7 +238,7 @@ func TestValidateEnvConfig(t *testing.T) {
 				URI:            new(""),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
 			},
-			want: apperrors.ErrDSNEmpty,
+			want: errDSNEmpty,
 		},
 		{
 			name: "Accrual system address is an empty string",
@@ -248,7 +247,7 @@ func TestValidateEnvConfig(t *testing.T) {
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new(""),
 			},
-			want: apperrors.ErrAccrualSysAddr,
+			want: errAccrualSysAddr,
 		},
 		{
 			name: "Variable as a whitespace-only string",
@@ -257,7 +256,7 @@ func TestValidateEnvConfig(t *testing.T) {
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
 			},
-			want: apperrors.ErrAddrEmpty,
+			want: errAddrEmpty,
 		},
 		{
 			name: "Several empty strings fail on the first one",
@@ -266,7 +265,7 @@ func TestValidateEnvConfig(t *testing.T) {
 				URI:            new("    "),
 				AccrualSysAddr: new("  "),
 			},
-			want: apperrors.ErrAddrEmpty,
+			want: errAddrEmpty,
 		},
 	}
 
