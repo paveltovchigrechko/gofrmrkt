@@ -32,6 +32,8 @@ func run(logger *zap.SugaredLogger) {
 	if err != nil {
 		logger.Fatal(err)
 	}
+	defer serv.CloseDB()
+
 	err = serv.Run()
 	if err != nil {
 		logger.Fatal(err)

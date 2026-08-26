@@ -1,7 +1,6 @@
 package server
 
 import (
-	"database/sql"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -14,41 +13,47 @@ type Server struct {
 	config   *config.AppConfig
 	router   *chi.Mux
 	handler  *handler.AppHandler
-	database *sql.DB
+	database *db.Postgres
 }
 
 func New(cfg *config.AppConfig, middlewares ...func(http.Handler) http.Handler) (*Server, error) {
-	r := chi.NewRouter()
-	h := handler.New()
+	postgresDB, err := db.NewPostgresDB(cfg.DatabaseURI)
+	if err != nil {
+		return nil, err
+	}
 
-	postgres, err := db.OpenDB(cfg.DatabaseURI)
-	if err != nil {
-		return nil, err
-	}
-	err = db.RunMigrations(postgres)
-	if err != nil {
-		postgres.Close()
-		return nil, err
-	}
+	h := handler.New(postgresDB)
+
+	r := chi.NewRouter()
+	r.Use(middlewares...)
+	// Public routers
+	r.Post("/api/user/register", h.RegisterUser)
+	r.Post("/api/user/login", h.AuthenticateUser)
+
+	// Private routes: require authentication
+	r.Group(func(r chi.Router) {
+		// r.Use(middleware.Authentication)
+		r.Post("/api/user/orders", h.UploadOrder)
+		r.Get("/api/user/orders", h.GetOrders)
+		r.Get("/api/user/balance", h.GetBalance)
+		r.Post("/api/user/balance/withdraw", h.WithdrawBalance)
+		r.Get("/api/user/withdrawals", h.GetWithdrawals)
+	})
 
 	s := &Server{
 		config:   cfg,
 		router:   r,
 		handler:  h,
-		database: postgres,
+		database: postgresDB,
 	}
-
-	s.setHandlers()
-	s.router.Use(middlewares...)
 
 	return s, nil
 }
 
 func (s *Server) Run() error {
-	return http.ListenAndServe(":1234", s.router)
+	return http.ListenAndServe(s.config.Addr, s.router)
 }
 
-func (s *Server) setHandlers() {
-	s.router.Post("/api/user/register", s.handler.RegisterUser)
-	s.router.Post("/api/user/login", s.handler.AuthenticateUser)
+func (s *Server) CloseDB() error {
+	return s.database.Close()
 }
