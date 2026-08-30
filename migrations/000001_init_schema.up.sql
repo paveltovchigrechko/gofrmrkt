@@ -12,8 +12,6 @@ CREATE TABLE users (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_users_login ON users(login);
-
 CREATE TABLE orders (
     number      VARCHAR(64) PRIMARY KEY,
     user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

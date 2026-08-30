@@ -15,36 +15,41 @@ func TestCreateAppConfig_Positive(t *testing.T) {
 		wantAddr           string
 		wantDbURI          string
 		wantAccrualSysAddr string
+		wantSecretKey      string
 	}{
 		{
 			name:               "Flags are parsed correctly when no env is present",
-			args:               []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address"},
+			args:               []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address", "-k", "some-secret-key"},
 			envVars:            map[string]string{},
 			wantAddr:           "127.0.0.1:4444",
 			wantDbURI:          "db_address",
 			wantAccrualSysAddr: "accrual_system_address",
+			wantSecretKey:      "some-secret-key",
 		},
 		{
 			name: "Env variables override flags completely",
-			args: []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address"},
+			args: []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address", "-k", "some-secret-key"},
 			envVars: map[string]string{
 				"RUN_ADDRESS":            "some-address",
 				"DATABASE_URI":           "some-database-uri",
 				"ACCRUAL_SYSTEM_ADDRESS": "some-accrual-system-address",
+				"SECRET_KEY":             "env-secret-key",
 			},
 			wantAddr:           "some-address",
 			wantDbURI:          "some-database-uri",
 			wantAccrualSysAddr: "some-accrual-system-address",
+			wantSecretKey:      "env-secret-key",
 		},
 		{
 			name: "Partial Env overrides only specific flags",
-			args: []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address"},
+			args: []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address", "-k", "some-secret-key"},
 			envVars: map[string]string{
 				"RUN_ADDRESS": "some-address",
 			},
 			wantAddr:           "some-address",
 			wantDbURI:          "db_address",
 			wantAccrualSysAddr: "accrual_system_address",
+			wantSecretKey:      "some-secret-key",
 		},
 	}
 	for _, tc := range testCases {
@@ -84,6 +89,7 @@ func TestCreateAppConfig_Negative(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", " ")
 		t.Setenv("DATABASE_URI", "db_address")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "accrual_system_address")
+		t.Setenv("SECRET_KEY", "env-secret-key")
 		cfg, err := CreateAppConfig([]string{})
 		assert.ErrorIs(t, err, errAddrEmpty)
 		assert.Nil(t, cfg)
@@ -93,6 +99,7 @@ func TestCreateAppConfig_Negative(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "localhost:8080")
 		t.Setenv("DATABASE_URI", "   ")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "accrual_system_address")
+		t.Setenv("SECRET_KEY", "env-secret-key")
 		cfg, err := CreateAppConfig([]string{})
 		assert.ErrorIs(t, err, errDSNEmpty)
 		assert.Nil(t, cfg)
@@ -102,15 +109,26 @@ func TestCreateAppConfig_Negative(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "localhost:8080")
 		t.Setenv("DATABASE_URI", "db_address")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", " ")
+		t.Setenv("SECRET_KEY", "env-secret-key")
 		cfg, err := CreateAppConfig([]string{})
 		assert.ErrorIs(t, err, errAccrualSysAddr)
+		assert.Nil(t, cfg)
+	})
+
+	t.Run("returns error when empty environment SECRET_KEY is passed", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "localhost:8080")
+		t.Setenv("DATABASE_URI", "db_address")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "accrual_system_address")
+		t.Setenv("SECRET_KEY", " ")
+		cfg, err := CreateAppConfig([]string{})
+		assert.ErrorIs(t, err, errSecretKeyEmpty)
 		assert.Nil(t, cfg)
 	})
 }
 
 func TestParseFlags(t *testing.T) {
 	t.Run("should parse custom flags successfully", func(t *testing.T) {
-		args := []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address"}
+		args := []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address", "-k", "some-secret-key"}
 		cfg, err := parseFlags(args)
 
 		require.NoError(t, err)
@@ -118,6 +136,7 @@ func TestParseFlags(t *testing.T) {
 		assert.Equal(t, "127.0.0.1:4444", cfg.Addr)
 		assert.Equal(t, "db_address", cfg.DatabaseURI)
 		assert.Equal(t, "accrual_system_address", cfg.AccrualSysAddr)
+		assert.Equal(t, "some-secret-key", cfg.SecretKey)
 	})
 
 	t.Run("should return error on invalid flags", func(t *testing.T) {
@@ -134,6 +153,7 @@ func TestParseConfig(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "some-address")
 		t.Setenv("DATABASE_URI", "some-database-uri")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "some-accrual-system-address")
+		t.Setenv("SECRET_KEY", "env-secret-key")
 
 		cfg, err := parseEnvConfig()
 		require.NotNil(t, cfg)
@@ -142,6 +162,7 @@ func TestParseConfig(t *testing.T) {
 		assert.Equal(t, *cfg.Addr, "some-address")
 		assert.Equal(t, *cfg.URI, "some-database-uri")
 		assert.Equal(t, *cfg.AccrualSysAddr, "some-accrual-system-address")
+		assert.Equal(t, *cfg.SecretKey, "env-secret-key")
 	})
 
 	t.Run("should parse some valid environment variables", func(t *testing.T) {
@@ -154,12 +175,14 @@ func TestParseConfig(t *testing.T) {
 		assert.Nil(t, cfg.Addr)
 		assert.Nil(t, cfg.URI)
 		assert.Equal(t, *cfg.AccrualSysAddr, "some-accrual-system-address")
+		assert.Nil(t, cfg.SecretKey)
 	})
 
 	t.Run("should succeed when no env vars are defined (pointers are nil)", func(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "")
 		t.Setenv("DATABASE_URI", "")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "")
 
 		cfg, err := parseEnvConfig()
 		require.NotNil(t, cfg)
@@ -168,12 +191,14 @@ func TestParseConfig(t *testing.T) {
 		assert.Nil(t, cfg.Addr)
 		assert.Nil(t, cfg.URI)
 		assert.Nil(t, cfg.AccrualSysAddr)
+		assert.Nil(t, cfg.SecretKey)
 	})
 
 	t.Run("should fail when address is empty", func(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "   ")
 		t.Setenv("DATABASE_URI", "")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "")
 
 		cfg, err := parseEnvConfig()
 		require.Nil(t, cfg)
@@ -186,6 +211,7 @@ func TestParseConfig(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "")
 		t.Setenv("DATABASE_URI", "    ")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "")
 
 		cfg, err := parseEnvConfig()
 		require.Nil(t, cfg)
@@ -198,6 +224,7 @@ func TestParseConfig(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "")
 		t.Setenv("DATABASE_URI", "")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "  ")
+		t.Setenv("SECRET_KEY", "")
 
 		cfg, err := parseEnvConfig()
 		require.Nil(t, cfg)
@@ -205,13 +232,26 @@ func TestParseConfig(t *testing.T) {
 
 		assert.ErrorIs(t, err, errAccrualSysAddr)
 	})
+
+	t.Run("should fail when secret key is empty", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "")
+		t.Setenv("DATABASE_URI", "")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "  ")
+
+		cfg, err := parseEnvConfig()
+		require.Nil(t, cfg)
+		require.NotNil(t, err)
+
+		assert.ErrorIs(t, err, errSecretKeyEmpty)
+	})
 }
 
 func TestValidateEnvConfig(t *testing.T) {
 	testCases := []struct {
-		name string
-		cfg  envConfig
-		want error
+		name    string
+		cfg     envConfig
+		wantErr error
 	}{
 		{
 			name: "All variables are set correctly",
@@ -219,8 +259,9 @@ func TestValidateEnvConfig(t *testing.T) {
 				Addr:           new("some-correct-addr"),
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
+				SecretKey:      new("some-secret-key"),
 			},
-			want: nil,
+			wantErr: nil,
 		},
 		{
 			name: "Address is an empty string",
@@ -228,8 +269,9 @@ func TestValidateEnvConfig(t *testing.T) {
 				Addr:           new(""),
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
+				SecretKey:      new("some-secret-key"),
 			},
-			want: errAddrEmpty,
+			wantErr: errAddrEmpty,
 		},
 		{
 			name: "DSN is an empty string",
@@ -237,8 +279,9 @@ func TestValidateEnvConfig(t *testing.T) {
 				Addr:           new("some-correct-addr"),
 				URI:            new(""),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
+				SecretKey:      new("some-secret-key"),
 			},
-			want: errDSNEmpty,
+			wantErr: errDSNEmpty,
 		},
 		{
 			name: "Accrual system address is an empty string",
@@ -246,8 +289,19 @@ func TestValidateEnvConfig(t *testing.T) {
 				Addr:           new("some-correct-addr"),
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new(""),
+				SecretKey:      new("some-secret-key"),
 			},
-			want: errAccrualSysAddr,
+			wantErr: errAccrualSysAddr,
+		},
+		{
+			name: "Secret key is an empty string",
+			cfg: envConfig{
+				Addr:           new("some-correct-addr"),
+				URI:            new("some-correct-dsn"),
+				AccrualSysAddr: new("some-correct-accrual-system-address"),
+				SecretKey:      new(""),
+			},
+			wantErr: errSecretKeyEmpty,
 		},
 		{
 			name: "Variable as a whitespace-only string",
@@ -255,8 +309,9 @@ func TestValidateEnvConfig(t *testing.T) {
 				Addr:           new("    "),
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
+				SecretKey:      new("some-secret-key"),
 			},
-			want: errAddrEmpty,
+			wantErr: errAddrEmpty,
 		},
 		{
 			name: "Several empty strings fail on the first one",
@@ -264,14 +319,15 @@ func TestValidateEnvConfig(t *testing.T) {
 				Addr:           new(""),
 				URI:            new("    "),
 				AccrualSysAddr: new("  "),
+				SecretKey:      new("some-secret-key"),
 			},
-			want: errAddrEmpty,
+			wantErr: errAddrEmpty,
 		},
 	}
 
 	for _, tc := range testCases {
 		result := validateEnvConfig(&tc.cfg)
 
-		assert.Equal(t, result, tc.want)
+		assert.Equal(t, result, tc.wantErr)
 	}
 }

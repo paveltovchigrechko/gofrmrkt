@@ -2,11 +2,18 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/config"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/db"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/handler"
+	"github.com/paveltovchigrechko/gofrmrkt/internal/middleware"
+	"github.com/paveltovchigrechko/gofrmrkt/internal/service"
+)
+
+const (
+	defaultTokenTimeToLive = time.Hour * 24
 )
 
 type Server struct {
@@ -25,14 +32,21 @@ func New(cfg *config.AppConfig, middlewares ...func(http.Handler) http.Handler) 
 	h := handler.New(postgresDB)
 
 	r := chi.NewRouter()
-	r.Use(middlewares...)
+	r.Use(middlewares...) // Middlewares order: figure out
 	// Public routers
 	r.Post("/api/user/register", h.RegisterUser)
 	r.Post("/api/user/login", h.AuthenticateUser)
 
-	// Private routes: require authentication
+	// Prepare authentication middleware
+	authService, err := service.NewAuthService(cfg.SecretKey, defaultTokenTimeToLive)
+	if err != nil {
+		return nil, err
+	}
+	authenticator := middleware.NewAuthenticator(authService)
+
+	// Private routes: require authentication middleware
 	r.Group(func(r chi.Router) {
-		// r.Use(middleware.Authentication)
+		r.Use(authenticator.UserIDMiddleware)
 		r.Post("/api/user/orders", h.UploadOrder)
 		r.Get("/api/user/orders", h.GetOrders)
 		r.Get("/api/user/balance", h.GetBalance)
