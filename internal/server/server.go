@@ -6,10 +6,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/config"
-	"github.com/paveltovchigrechko/gofrmrkt/internal/db"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/handler"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/middleware"
+	"github.com/paveltovchigrechko/gofrmrkt/internal/repo"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/service"
+	"go.uber.org/zap"
 )
 
 const (
@@ -20,16 +21,22 @@ type Server struct {
 	config   *config.AppConfig
 	router   *chi.Mux
 	handler  *handler.AppHandler
-	database *db.Postgres
+	database *repo.Postgres
 }
 
-func New(cfg *config.AppConfig, middlewares ...func(http.Handler) http.Handler) (*Server, error) {
-	postgresDB, err := db.NewPostgresDB(cfg.DatabaseURI)
+func New(cfg *config.AppConfig, logger *zap.SugaredLogger, middlewares ...func(http.Handler) http.Handler) (*Server, error) {
+	postgresDB, err := repo.NewPostgresDB(cfg.DatabaseURI)
 	if err != nil {
+		logger.Errorw(err.Error())
+		return nil, err
+	}
+	authService, err := service.NewAuthService(cfg.SecretKey, defaultTokenTimeToLive)
+	if err != nil {
+		logger.Errorw(err.Error())
 		return nil, err
 	}
 
-	h := handler.New(postgresDB)
+	h := handler.New(postgresDB, logger, authService)
 
 	r := chi.NewRouter()
 	r.Use(middlewares...) // Middlewares order: figure out
@@ -38,20 +45,17 @@ func New(cfg *config.AppConfig, middlewares ...func(http.Handler) http.Handler) 
 	r.Post("/api/user/login", h.AuthenticateUser)
 
 	// Prepare authentication middleware
-	authService, err := service.NewAuthService(cfg.SecretKey, defaultTokenTimeToLive)
-	if err != nil {
-		return nil, err
-	}
+
 	authenticator := middleware.NewAuthenticator(authService)
 
 	// Private routes: require authentication middleware
 	r.Group(func(r chi.Router) {
 		r.Use(authenticator.UserIDMiddleware)
-		r.Post("/api/user/orders", h.UploadOrder)
-		r.Get("/api/user/orders", h.GetOrders)
-		r.Get("/api/user/balance", h.GetBalance)
-		r.Post("/api/user/balance/withdraw", h.WithdrawBalance)
-		r.Get("/api/user/withdrawals", h.GetWithdrawals)
+		// r.Post("/api/user/orders", h.UploadOrder)
+		// r.Get("/api/user/orders", h.GetOrders)
+		// r.Get("/api/user/balance", h.GetBalance)
+		// r.Post("/api/user/balance/withdraw", h.WithdrawBalance)
+		// r.Get("/api/user/withdrawals", h.GetWithdrawals)
 	})
 
 	s := &Server{
