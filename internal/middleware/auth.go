@@ -35,6 +35,7 @@ func (a *Authenticator) UserIDMiddleware(next http.Handler) http.Handler {
 		token := extractToken(r)
 		if token == "" {
 			http.Error(w, errMissingToken.Error(), http.StatusUnauthorized)
+			return
 		}
 
 		userID, err := a.authService.GetUserID(token)

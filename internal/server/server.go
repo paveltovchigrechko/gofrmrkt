@@ -13,59 +13,46 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	defaultTokenTimeToLive = time.Hour * 24
-)
+const defaultTokenTimeToLive = time.Hour * 24
 
 type Server struct {
-	config   *config.AppConfig
-	router   *chi.Mux
-	handler  *handler.AppHandler
-	database *repo.Postgres
+	config  *config.AppConfig
+	router  *chi.Mux
+	handler *handler.AppHandler
+	storage repo.Storage
 }
 
-func New(cfg *config.AppConfig, logger *zap.SugaredLogger, middlewares ...func(http.Handler) http.Handler) (*Server, error) {
-	postgresDB, err := repo.NewPostgresDB(cfg.DatabaseURI)
-	if err != nil {
-		logger.Errorw(err.Error())
-		return nil, err
-	}
+func New(cfg *config.AppConfig, logger *zap.SugaredLogger, storage repo.Storage) (*Server, error) {
 	authService, err := service.NewAuthService(cfg.SecretKey, defaultTokenTimeToLive)
 	if err != nil {
-		logger.Errorw(err.Error())
 		return nil, err
 	}
 
-	h := handler.New(postgresDB, logger, authService)
+	h := handler.New(storage, logger, authService)
 
 	r := chi.NewRouter()
-	r.Use(middlewares...) // Middlewares order: figure out
-	// Public routers
+	r.Use(middleware.GZIPMiddleware)
+	r.Use(middleware.Logger(logger))
+
 	r.Post("/api/user/register", h.RegisterUser)
 	r.Post("/api/user/login", h.AuthenticateUser)
 
-	// Prepare authentication middleware
-
 	authenticator := middleware.NewAuthenticator(authService)
-
-	// Private routes: require authentication middleware
 	r.Group(func(r chi.Router) {
 		r.Use(authenticator.UserIDMiddleware)
-		// r.Post("/api/user/orders", h.UploadOrder)
-		// r.Get("/api/user/orders", h.GetOrders)
-		// r.Get("/api/user/balance", h.GetBalance)
-		// r.Post("/api/user/balance/withdraw", h.WithdrawBalance)
-		// r.Get("/api/user/withdrawals", h.GetWithdrawals)
+		r.Post("/api/user/orders", h.UploadOrder)
+		r.Get("/api/user/orders", h.GetOrders)
+		r.Get("/api/user/balance", h.GetBalance)
+		r.Post("/api/user/balance/withdraw", h.WithdrawBalance)
+		r.Get("/api/user/withdrawals", h.GetWithdrawals)
 	})
 
-	s := &Server{
-		config:   cfg,
-		router:   r,
-		handler:  h,
-		database: postgresDB,
-	}
-
-	return s, nil
+	return &Server{
+		config:  cfg,
+		router:  r,
+		handler: h,
+		storage: storage,
+	}, nil
 }
 
 func (s *Server) Run() error {
@@ -73,5 +60,5 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) CloseDB() error {
-	return s.database.Close()
+	return s.storage.Close()
 }

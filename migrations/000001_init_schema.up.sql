@@ -16,7 +16,7 @@ CREATE TABLE orders (
     number      VARCHAR(64) PRIMARY KEY,
     user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     status      order_status NOT NULL DEFAULT 'NEW',
-    accrual     NUMERIC(12, 2) DEFAULT 0.00,
+    accrual     NUMERIC(12, 2),
     uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

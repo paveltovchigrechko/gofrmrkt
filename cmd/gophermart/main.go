@@ -6,6 +6,7 @@ import (
 
 	"github.com/paveltovchigrechko/gofrmrkt/internal/config"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/middleware"
+	"github.com/paveltovchigrechko/gofrmrkt/internal/repo"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/server"
 	"go.uber.org/zap"
 )
@@ -28,14 +29,18 @@ func run(logger *zap.SugaredLogger) {
 		logger.Fatal(err)
 	}
 
-	serv, err := server.New(cfg, middleware.Logger(logger))
+	storage, err := repo.NewPostgresDB(cfg.DatabaseURI)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	serv, err := server.New(cfg, logger, storage)
 	if err != nil {
 		logger.Fatal(err)
 	}
 	defer serv.CloseDB()
 
-	err = serv.Run()
-	if err != nil {
+	if err := serv.Run(); err != nil {
 		logger.Fatal(err)
 	}
 }
