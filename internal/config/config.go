@@ -1,8 +1,11 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
+	"fmt"
 	"strings"
 
 	"github.com/caarlos0/env/v6"
@@ -68,7 +71,11 @@ func CreateAppConfig(args []string) (*AppConfig, error) {
 	if envCfg.SecretKey != nil {
 		cfg.SecretKey = *envCfg.SecretKey
 	} else if strings.TrimSpace(cfg.SecretKey) == "" {
-		return nil, errSecretKeyEmpty
+		generated, err := generateSecretKey() // crypto/rand, hex-encode ~32 bytes
+		if err != nil {
+			return nil, err
+		}
+		cfg.SecretKey = generated
 	}
 
 	return cfg, nil
@@ -130,4 +137,12 @@ func validateEnvConfig(cfg *envConfig) error {
 	}
 
 	return nil
+}
+
+func generateSecretKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate secret key: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }

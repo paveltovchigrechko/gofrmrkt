@@ -13,16 +13,16 @@ func TestCreateAppConfig_Positive(t *testing.T) {
 		args               []string
 		envVars            map[string]string
 		wantAddr           string
-		wantDbURI          string
+		wantDBURI          string
 		wantAccrualSysAddr string
-		wantSecretKey      string
+		wantSecretKey      string // TODO: it is fine to have empty secret key
 	}{
 		{
 			name:               "Flags are parsed correctly when no env is present",
 			args:               []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address", "-k", "some-secret-key"},
 			envVars:            map[string]string{},
 			wantAddr:           "127.0.0.1:4444",
-			wantDbURI:          "db_address",
+			wantDBURI:          "db_address",
 			wantAccrualSysAddr: "accrual_system_address",
 			wantSecretKey:      "some-secret-key",
 		},
@@ -36,7 +36,7 @@ func TestCreateAppConfig_Positive(t *testing.T) {
 				"SECRET_KEY":             "env-secret-key",
 			},
 			wantAddr:           "some-address",
-			wantDbURI:          "some-database-uri",
+			wantDBURI:          "some-database-uri",
 			wantAccrualSysAddr: "some-accrual-system-address",
 			wantSecretKey:      "env-secret-key",
 		},
@@ -47,7 +47,7 @@ func TestCreateAppConfig_Positive(t *testing.T) {
 				"RUN_ADDRESS": "some-address",
 			},
 			wantAddr:           "some-address",
-			wantDbURI:          "db_address",
+			wantDBURI:          "db_address",
 			wantAccrualSysAddr: "accrual_system_address",
 			wantSecretKey:      "some-secret-key",
 		},
@@ -66,7 +66,7 @@ func TestCreateAppConfig_Positive(t *testing.T) {
 			require.NotNil(t, cfg)
 
 			assert.Equal(t, tc.wantAddr, cfg.Addr)
-			assert.Equal(t, tc.wantDbURI, cfg.DatabaseURI)
+			assert.Equal(t, tc.wantDBURI, cfg.DatabaseURI)
 			assert.Equal(t, tc.wantAccrualSysAddr, cfg.AccrualSysAddr)
 		})
 	}
