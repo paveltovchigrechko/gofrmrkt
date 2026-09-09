@@ -1,15 +1,18 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/paveltovchigrechko/gofrmrkt/internal/accrual"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/config"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/handler"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/middleware"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/repo"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/service"
+	"github.com/paveltovchigrechko/gofrmrkt/internal/worker"
 	"go.uber.org/zap"
 )
 
@@ -46,6 +49,10 @@ func New(cfg *config.AppConfig, logger *zap.SugaredLogger, storage repo.Storage)
 		r.Post("/api/user/balance/withdraw", h.WithdrawBalance)
 		r.Get("/api/user/withdrawals", h.GetWithdrawals)
 	})
+
+	accrualClient := accrual.NewClient(cfg.AccrualSysAddr)
+	accrualWorker := worker.NewAccrualWorker(storage, accrualClient, logger)
+	go accrualWorker.Run(context.Background())
 
 	return &Server{
 		config:  cfg,
