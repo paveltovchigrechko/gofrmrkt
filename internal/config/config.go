@@ -71,7 +71,7 @@ func CreateAppConfig(args []string) (*AppConfig, error) {
 	if envCfg.SecretKey != nil {
 		cfg.SecretKey = *envCfg.SecretKey
 	} else if strings.TrimSpace(cfg.SecretKey) == "" {
-		generated, err := generateSecretKey() // crypto/rand, hex-encode ~32 bytes
+		generated, err := generateSecretKey()
 		if err != nil {
 			return nil, err
 		}

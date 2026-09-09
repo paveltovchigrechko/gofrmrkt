@@ -10,6 +10,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 var (
@@ -21,7 +22,8 @@ var (
 )
 
 const (
-	databaseDriver = "postgres"
+	databaseDriver = "pgx"
+	migrationLabel = "postgres"
 	migrationPath  = "file://migrations"
 )
 
