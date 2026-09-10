@@ -75,3 +75,11 @@ func UserIDFromContext(ctx context.Context) (int64, bool) {
 	userID, ok := ctx.Value(userIDKey).(int64)
 	return userID, ok
 }
+
+// ContextWithUserID returns a copy of ctx carrying userID under the same
+// key UserIDFromContext reads. Exported so handler tests can simulate an
+// already-authenticated request without exercising the JWT/middleware
+// pipeline itself.
+func ContextWithUserID(ctx context.Context, userID int64) context.Context {
+	return context.WithValue(ctx, userIDKey, userID)
+}

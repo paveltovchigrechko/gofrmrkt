@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
 	"regexp"
 	"testing"
 	"time"
@@ -32,8 +33,6 @@ func newMockPostgres(t *testing.T) (*Postgres, sqlmock.Sqlmock) {
 func uniqueViolationErr() error {
 	return &pgconn.PgError{Code: pgerrcode.UniqueViolation}
 }
-
-// --- RegisterUser ---
 
 func TestPostgres_RegisterUser_Success(t *testing.T) {
 	pg, mock := newMockPostgres(t)
@@ -71,8 +70,6 @@ func TestPostgres_RegisterUser_OtherDBError(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrUserLoginExist)
 }
 
-// --- GetUserByLogin ---
-
 func TestPostgres_GetUserByLogin_Success(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
@@ -96,8 +93,6 @@ func TestPostgres_GetUserByLogin_NotFound(t *testing.T) {
 	_, _, err := pg.GetUserByLogin(context.Background(), "ghost")
 	assert.ErrorIs(t, err, ErrUserNotFound)
 }
-
-// --- UploadOrder ---
 
 func TestPostgres_UploadOrder_New(t *testing.T) {
 	pg, mock := newMockPostgres(t)
@@ -168,8 +163,6 @@ func TestPostgres_UploadOrder_OtherDBError(t *testing.T) {
 	assert.ErrorIs(t, err, dbErr)
 }
 
-// --- GetOrders ---
-
 func TestPostgres_GetOrders_MixedAccrual(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
@@ -215,8 +208,6 @@ func TestPostgres_GetOrders_QueryError(t *testing.T) {
 	assert.ErrorIs(t, err, dbErr)
 }
 
-// --- GetBalance ---
-
 func TestPostgres_GetBalance_Success(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
@@ -242,44 +233,83 @@ func TestPostgres_GetBalance_Error(t *testing.T) {
 	assert.ErrorIs(t, err, dbErr)
 }
 
-// --- WithdrawBalance ---
+const testIdempotencyKey = "test-idempotency-key-0001"
 
-func TestPostgres_WithdrawBalance_Success(t *testing.T) {
+func TestPostgres_attemptWithdraw_NewWithdrawal_Success(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
 		WithArgs(int64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(testIdempotencyKey).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
 		WithArgs(int64(1)).
 		WillReturnRows(sqlmock.NewRows([]string{"current", "withdrawn"}).AddRow(1000.0, 0.0))
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO withdrawals (user_id, order_number, sum)`)).
-		WithArgs(int64(1), "12345", 500.0).
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO withdrawals (user_id, order_number, sum, idempotency_key)`)).
+		WithArgs(int64(1), "12345", 500.0, testIdempotencyKey).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
-	err := pg.WithdrawBalance(context.Background(), 1, "12345", 500.0)
+	err := pg.attemptWithdraw(context.Background(), 1, "12345", 500.0, testIdempotencyKey)
 	assert.NoError(t, err)
 }
 
-func TestPostgres_WithdrawBalance_InsufficientFunds(t *testing.T) {
+func TestPostgres_attemptWithdraw_AlreadyApplied_SkipsBalanceCheckAndInsert(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
 		WithArgs(int64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(testIdempotencyKey).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectCommit()
+
+	err := pg.attemptWithdraw(context.Background(), 1, "12345", 500.0, testIdempotencyKey)
+	assert.NoError(t, err)
+}
+
+func TestPostgres_attemptWithdraw_IdempotencyCheckFails(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+
+	dbErr := errors.New("idempotency check failed")
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
+		WithArgs(int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(testIdempotencyKey).
+		WillReturnError(dbErr)
+	mock.ExpectRollback()
+
+	err := pg.attemptWithdraw(context.Background(), 1, "12345", 500.0, testIdempotencyKey)
+	assert.ErrorIs(t, err, dbErr)
+}
+
+func TestPostgres_attemptWithdraw_InsufficientFunds(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
+		WithArgs(int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(testIdempotencyKey).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
 		WithArgs(int64(1)).
 		WillReturnRows(sqlmock.NewRows([]string{"current", "withdrawn"}).AddRow(100.0, 0.0))
 	mock.ExpectRollback()
 
-	err := pg.WithdrawBalance(context.Background(), 1, "12345", 500.0)
+	err := pg.attemptWithdraw(context.Background(), 1, "12345", 500.0, testIdempotencyKey)
 	assert.ErrorIs(t, err, ErrInsufficientBalance)
 }
 
-func TestPostgres_WithdrawBalance_LockFails(t *testing.T) {
+func TestPostgres_attemptWithdraw_LockFails(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	dbErr := errors.New("lock timeout")
@@ -289,11 +319,11 @@ func TestPostgres_WithdrawBalance_LockFails(t *testing.T) {
 		WillReturnError(dbErr)
 	mock.ExpectRollback()
 
-	err := pg.WithdrawBalance(context.Background(), 1, "12345", 500.0)
+	err := pg.attemptWithdraw(context.Background(), 1, "12345", 500.0, testIdempotencyKey)
 	assert.ErrorIs(t, err, dbErr)
 }
 
-func TestPostgres_WithdrawBalance_InsertFails(t *testing.T) {
+func TestPostgres_attemptWithdraw_InsertFails(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	dbErr := errors.New("insert failed")
@@ -301,19 +331,137 @@ func TestPostgres_WithdrawBalance_InsertFails(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
 		WithArgs(int64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(testIdempotencyKey).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
 		WithArgs(int64(1)).
 		WillReturnRows(sqlmock.NewRows([]string{"current", "withdrawn"}).AddRow(1000.0, 0.0))
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO withdrawals (user_id, order_number, sum)`)).
-		WithArgs(int64(1), "12345", 500.0).
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO withdrawals (user_id, order_number, sum, idempotency_key)`)).
+		WithArgs(int64(1), "12345", 500.0, testIdempotencyKey).
 		WillReturnError(dbErr)
 	mock.ExpectRollback()
 
-	err := pg.WithdrawBalance(context.Background(), 1, "12345", 500.0)
+	err := pg.attemptWithdraw(context.Background(), 1, "12345", 500.0, testIdempotencyKey)
 	assert.ErrorIs(t, err, dbErr)
 }
 
-// --- GetWithdrawals ---
+func TestPostgres_WithdrawBalance_Success(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
+		WithArgs(int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
+		WithArgs(int64(1)).
+		WillReturnRows(sqlmock.NewRows([]string{"current", "withdrawn"}).AddRow(1000.0, 0.0))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO withdrawals (user_id, order_number, sum, idempotency_key)`)).
+		WithArgs(int64(1), "12345", 500.0, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := pg.WithdrawBalance(context.Background(), 1, "12345", 500.0)
+	assert.NoError(t, err)
+}
+
+func TestPostgres_WithdrawBalance_ContextAlreadyCanceled_NoDBCallsMade(t *testing.T) {
+	pg, _ := newMockPostgres(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := pg.WithdrawBalance(ctx, 1, "12345", 500.0)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestPostgres_WithdrawBalance_NonRetriableError_FailsAfterOneAttempt(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
+		WithArgs(int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
+		WithArgs(int64(1)).
+		WillReturnRows(sqlmock.NewRows([]string{"current", "withdrawn"}).AddRow(100.0, 0.0))
+	mock.ExpectRollback()
+
+	err := pg.WithdrawBalance(context.Background(), 1, "12345", 500.0)
+	assert.ErrorIs(t, err, ErrInsufficientBalance)
+}
+
+func TestPostgres_WithdrawBalance_RetriesOnConnectionError_ThenSucceeds(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+
+	retriableErr := &pgconn.PgError{Code: "08006"} // connection_failure
+
+	// Attempt 1: fails with a retriable connection error.
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
+		WithArgs(int64(1)).
+		WillReturnError(retriableErr)
+	mock.ExpectRollback()
+
+	// Attempt 2 (after ~1s backoff): succeeds.
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SELECT id FROM users WHERE id = $1 FOR UPDATE`)).
+		WithArgs(int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`)).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
+		WithArgs(int64(1)).
+		WillReturnRows(sqlmock.NewRows([]string{"current", "withdrawn"}).AddRow(1000.0, 0.0))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO withdrawals (user_id, order_number, sum, idempotency_key)`)).
+		WithArgs(int64(1), "12345", 500.0, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := pg.WithdrawBalance(context.Background(), 1, "12345", 500.0)
+	assert.NoError(t, err)
+}
+
+func TestGenerateIdempotencyKey_ReturnsDistinctValidHex(t *testing.T) {
+	key1, err := generateIdempotencyKey()
+	require.NoError(t, err)
+	assert.Len(t, key1, 32)
+
+	key2, err := generateIdempotencyKey()
+	require.NoError(t, err)
+	assert.NotEqual(t, key1, key2)
+}
+
+func TestIsRetriableDBError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", errors.New("something else"), false},
+		{"pg connection_exception class", &pgconn.PgError{Code: "08000"}, true},
+		{"pg connection_failure", &pgconn.PgError{Code: "08006"}, true},
+		{"pg unique_violation is not retriable", &pgconn.PgError{Code: pgerrcode.UniqueViolation}, false},
+		{"pgx connect error", &pgconn.ConnectError{}, true},
+		{"net.OpError", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, true},
+		{"context deadline exceeded", context.DeadlineExceeded, true},
+		{"wrapped context deadline exceeded", errors.New("wrapper"), false}, // not wrapped with %w, sanity check
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isRetriableDBError(tt.err))
+		})
+	}
+}
 
 func TestPostgres_GetWithdrawals_Success(t *testing.T) {
 	pg, mock := newMockPostgres(t)
@@ -355,8 +503,6 @@ func TestPostgres_GetWithdrawals_Error(t *testing.T) {
 	assert.ErrorIs(t, err, dbErr)
 }
 
-// --- GetPendingOrders ---
-
 func TestPostgres_GetPendingOrders_Success(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
@@ -384,8 +530,6 @@ func TestPostgres_GetPendingOrders_Error(t *testing.T) {
 	_, err := pg.GetPendingOrders(context.Background(), 10)
 	assert.ErrorIs(t, err, dbErr)
 }
-
-// --- UpdateOrderStatus ---
 
 func TestPostgres_UpdateOrderStatus_WithAccrual(t *testing.T) {
 	pg, mock := newMockPostgres(t)

@@ -2,8 +2,14 @@ package repo
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strings"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -11,6 +17,8 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/paveltovchigrechko/gofrmrkt/internal/service/retry"
 )
 
 var (
@@ -180,35 +188,14 @@ func (db *Postgres) GetBalance(ctx context.Context, userID int64) (float64, floa
 }
 
 func (db *Postgres) WithdrawBalance(ctx context.Context, userID int64, orderNumber string, sum float64) error {
-	tx, err := db.database.BeginTx(ctx, nil)
+	idempotencyKey, err := generateIdempotencyKey()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
 
-	// Lock the user's row to serialize concurrent withdrawals against
-	// this derived (non-row-backed) balance.
-	if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
-		return err
-	}
-
-	current, _, err := getBalance(ctx, tx, userID)
-	if err != nil {
-		return err
-	}
-	if sum > current {
-		return ErrInsufficientBalance
-	}
-
-	insertQuery := `
-		INSERT INTO withdrawals (user_id, order_number, sum)
-		VALUES ($1, $2, $3)
-	`
-	if _, err := tx.ExecContext(ctx, insertQuery, userID, orderNumber, sum); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return retry.Do(ctx, isRetriableDBError, func() error {
+		return db.attemptWithdraw(ctx, userID, orderNumber, sum, idempotencyKey)
+	})
 }
 
 func (db *Postgres) GetWithdrawals(ctx context.Context, userID int64) ([]Withdrawal, error) {
@@ -304,4 +291,80 @@ func runMigrations(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func (db *Postgres) attemptWithdraw(ctx context.Context, userID int64, orderNumber string, sum float64, idempotencyKey string) error {
+	tx, err := db.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Lock the user's row to serialize concurrent withdrawals against
+	// this derived (non-row-backed) balance.
+	if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+		return err
+	}
+
+	// Idempotency check MUST come before the balance check. If a prior
+	// attempt already committed, current balance already reflects that
+	// withdrawal — checking balance first here would incorrectly re-evaluate
+	// sufficiency against an already-adjusted balance.
+	var alreadyApplied bool
+	checkQuery := `SELECT EXISTS(SELECT 1 FROM withdrawals WHERE idempotency_key = $1)`
+	if err := tx.QueryRowContext(ctx, checkQuery, idempotencyKey).Scan(&alreadyApplied); err != nil {
+		return err
+	}
+	if alreadyApplied {
+		return tx.Commit() // nothing to do; prior attempt already succeeded
+	}
+
+	current, _, err := getBalance(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	if sum > current {
+		return ErrInsufficientBalance
+	}
+
+	insertQuery := `
+		INSERT INTO withdrawals (user_id, order_number, sum, idempotency_key)
+		VALUES ($1, $2, $3, $4)
+	`
+	if _, err := tx.ExecContext(ctx, insertQuery, userID, orderNumber, sum, idempotencyKey); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func generateIdempotencyKey() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate idempotency key: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func isRetriableDBError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "08") {
+		return true
+	}
+
+	var connErr *pgconn.ConnectError
+	if errors.As(err, &connErr) {
+		return true
+	}
+
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF)
 }
