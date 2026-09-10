@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,13 +18,18 @@ import (
 	"go.uber.org/zap"
 )
 
-const defaultTokenTimeToLive = time.Hour * 24
+const (
+	defaultTokenTimeToLive = time.Hour * 24
+	shutdownTimeout        = 15 * time.Second
+)
 
 type Server struct {
-	config  *config.AppConfig
-	router  *chi.Mux
-	handler *handler.AppHandler
-	storage repo.Storage
+	config     *config.AppConfig
+	httpServer *http.Server
+	handler    *handler.AppHandler
+	storage    repo.Storage
+	worker     *worker.AccrualWorker
+	logger     *zap.SugaredLogger
 }
 
 func New(cfg *config.AppConfig, logger *zap.SugaredLogger, storage repo.Storage) (*Server, error) {
@@ -52,20 +59,62 @@ func New(cfg *config.AppConfig, logger *zap.SugaredLogger, storage repo.Storage)
 
 	accrualClient := accrual.NewClient(cfg.AccrualSysAddr)
 	accrualWorker := worker.NewAccrualWorker(storage, accrualClient, logger)
-	go accrualWorker.Run(context.Background())
 
 	return &Server{
-		config:  cfg,
-		router:  r,
-		handler: h,
-		storage: storage,
+		config:     cfg,
+		httpServer: &http.Server{Addr: cfg.Addr, Handler: r},
+		handler:    h,
+		storage:    storage,
+		worker:     accrualWorker,
+		logger:     logger,
 	}, nil
 }
 
-func (s *Server) Run() error {
-	return http.ListenAndServe(s.config.Addr, s.router)
-}
+// Run starts the HTTP server and the accrual worker, and blocks until ctx
+// is canceled or the HTTP server fails to start. On return, both the
+// worker and the storage connection are guaranteed to be fully stopped —
+// callers don't need their own cleanup beyond calling Run.
+func (s *Server) Run(ctx context.Context) error {
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	defer cancelWorker()
 
-func (s *Server) CloseDB() error {
-	return s.storage.Close()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.worker.Run(workerCtx)
+	}()
+
+	serveErrCh := make(chan error, 1)
+	go func() {
+		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErrCh <- err
+			return
+		}
+		serveErrCh <- nil
+	}()
+
+	var runErr error
+	select {
+	case <-ctx.Done():
+		s.logger.Infow("shutting down server")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			s.logger.Errorw("http server shutdown", "error", err)
+		}
+	case err := <-serveErrCh:
+		runErr = err
+	}
+
+	// Ensure the worker stops on every exit path, not just the ctx.Done()
+	// (signal-triggered) one — e.g. if ListenAndServe failed on startup.
+	cancelWorker()
+	wg.Wait()
+
+	if err := s.storage.Close(); err != nil {
+		s.logger.Errorw("close storage", "error", err)
+	}
+
+	return runErr
 }

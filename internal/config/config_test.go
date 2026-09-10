@@ -15,7 +15,7 @@ func TestCreateAppConfig_Positive(t *testing.T) {
 		wantAddr           string
 		wantDBURI          string
 		wantAccrualSysAddr string
-		wantSecretKey      string // TODO: it is fine to have empty secret key
+		wantSecretKey      string
 	}{
 		{
 			name:               "Flags are parsed correctly when no env is present",

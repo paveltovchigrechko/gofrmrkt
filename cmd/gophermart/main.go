@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/paveltovchigrechko/gofrmrkt/internal/config"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/middleware"
@@ -38,9 +41,11 @@ func run(logger *zap.SugaredLogger) {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	defer serv.CloseDB()
 
-	if err := serv.Run(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := serv.Run(ctx); err != nil {
 		logger.Fatal(err)
 	}
 }

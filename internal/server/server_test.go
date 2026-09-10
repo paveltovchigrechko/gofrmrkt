@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,8 +19,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// stubStorage is a minimal repo.Storage implementation with per-call
-// override hooks; unconfigured methods return zero values.
 type stubStorage struct {
 	getOrdersFn func(ctx context.Context, userID int64) ([]repo.Order, error)
 	closeCalled bool
@@ -88,8 +87,6 @@ func validAuthCookie(t *testing.T, cfg *config.AppConfig, userID int64) *http.Co
 	return &http.Cookie{Name: "token", Value: token}
 }
 
-// --- public routes ---
-
 func TestServer_PublicRoutes_NoAuthRequired(t *testing.T) {
 	srv := newTestServer(t, &stubStorage{})
 
@@ -108,15 +105,12 @@ func TestServer_PublicRoutes_NoAuthRequired(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
-			srv.router.ServeHTTP(rec, req)
+			srv.httpServer.Handler.ServeHTTP(rec, req)
 
-			// No token was sent; a public route must not answer 401.
 			assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
 		})
 	}
 }
-
-// --- private routes ---
 
 func TestServer_PrivateRoutes_RejectMissingToken(t *testing.T) {
 	srv := newTestServer(t, &stubStorage{})
@@ -137,7 +131,7 @@ func TestServer_PrivateRoutes_RejectMissingToken(t *testing.T) {
 			req := httptest.NewRequest(rt.method, rt.path, nil)
 			rec := httptest.NewRecorder()
 
-			srv.router.ServeHTTP(rec, req)
+			srv.httpServer.Handler.ServeHTTP(rec, req)
 
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 		})
@@ -157,12 +151,10 @@ func TestServer_PrivateRoute_ReachesHandlerWithValidToken(t *testing.T) {
 	req.AddCookie(validAuthCookie(t, cfg, 42))
 	rec := httptest.NewRecorder()
 
-	srv.router.ServeHTTP(rec, req)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
-
-// --- routing ---
 
 func TestServer_UnknownRoute_Returns404(t *testing.T) {
 	srv := newTestServer(t, &stubStorage{})
@@ -170,12 +162,10 @@ func TestServer_UnknownRoute_Returns404(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/does/not/exist", nil)
 	rec := httptest.NewRecorder()
 
-	srv.router.ServeHTTP(rec, req)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
-
-// --- gzip wiring ---
 
 func TestServer_GZIPMiddleware_CompressesResponseWhenAccepted(t *testing.T) {
 	cfg := &config.AppConfig{Addr: "localhost:0", SecretKey: "test-secret-key-for-server-tests"}
@@ -191,7 +181,7 @@ func TestServer_GZIPMiddleware_CompressesResponseWhenAccepted(t *testing.T) {
 	req.AddCookie(validAuthCookie(t, cfg, 42))
 	rec := httptest.NewRecorder()
 
-	srv.router.ServeHTTP(rec, req)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
@@ -205,12 +195,42 @@ func TestServer_GZIPMiddleware_CompressesResponseWhenAccepted(t *testing.T) {
 	assert.Contains(t, string(body), "12345678903")
 }
 
-// --- lifecycle ---
-
-func TestServer_CloseDB_ClosesStorage(t *testing.T) {
+func TestServer_Run_ContextCancellation_ShutsDownAndClosesStorage(t *testing.T) {
+	cfg := &config.AppConfig{Addr: "127.0.0.1:0", SecretKey: "test-secret-key-for-server-tests"}
 	storage := &stubStorage{}
-	srv := newTestServer(t, storage)
+	srv := newTestServerWithConfig(t, cfg, storage)
 
-	require.NoError(t, srv.CloseDB())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- srv.Run(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-runErrCh:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of context cancellation")
+	}
+
+	assert.True(t, storage.closeCalled)
+}
+
+func TestServer_Run_ListenFails_StillStopsWorkerAndClosesStorage(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	cfg := &config.AppConfig{Addr: listener.Addr().String(), SecretKey: "test-secret-key-for-server-tests"}
+	storage := &stubStorage{}
+	srv := newTestServerWithConfig(t, cfg, storage)
+
+	runErr := srv.Run(context.Background())
+
+	require.Error(t, runErr)
 	assert.True(t, storage.closeCalled)
 }
