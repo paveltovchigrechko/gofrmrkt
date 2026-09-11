@@ -1,4 +1,4 @@
 # cmd/gophermart
 
-В данной директории будет содержаться код накопительной системы лояльности, который скомпилируется в бинарное
-приложение.
+Entry point for the gophermart loyalty-system binary. See the
+[project README](../../README.md) for configuration, the API, and how to run it.
