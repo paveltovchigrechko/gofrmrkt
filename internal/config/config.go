@@ -22,7 +22,6 @@ var (
 	errAddrEmpty      = errors.New("server address is empty")
 	errDSNEmpty       = errors.New("database DSN is empty")
 	errAccrualSysAddr = errors.New("accrual system address is empty")
-	errSecretKeyEmpty = errors.New("secret key is empty")
 )
 
 type AppConfig struct {
@@ -52,7 +51,7 @@ func CreateAppConfig(args []string) (*AppConfig, error) {
 
 	if envCfg.Addr != nil {
 		cfg.Addr = *envCfg.Addr
-	} else if strings.Trim(cfg.Addr, " ") == "" {
+	} else if strings.TrimSpace(cfg.Addr) == "" {
 		return nil, errAddrEmpty
 	}
 
@@ -70,7 +69,9 @@ func CreateAppConfig(args []string) (*AppConfig, error) {
 
 	if envCfg.SecretKey != nil {
 		cfg.SecretKey = *envCfg.SecretKey
-	} else if strings.TrimSpace(cfg.SecretKey) == "" {
+	}
+
+	if strings.TrimSpace(cfg.SecretKey) == "" {
 		generated, err := generateSecretKey()
 		if err != nil {
 			return nil, err
@@ -130,10 +131,6 @@ func validateEnvConfig(cfg *envConfig) error {
 
 	if cfg.AccrualSysAddr != nil && strings.TrimSpace(*cfg.AccrualSysAddr) == "" {
 		return errAccrualSysAddr
-	}
-
-	if cfg.SecretKey != nil && strings.TrimSpace(*cfg.SecretKey) == "" {
-		return errSecretKeyEmpty
 	}
 
 	return nil

@@ -114,16 +114,6 @@ func TestCreateAppConfig_Negative(t *testing.T) {
 		assert.ErrorIs(t, err, errAccrualSysAddr)
 		assert.Nil(t, cfg)
 	})
-
-	t.Run("returns error when empty environment SECRET_KEY is passed", func(t *testing.T) {
-		t.Setenv("RUN_ADDRESS", "localhost:8080")
-		t.Setenv("DATABASE_URI", "db_address")
-		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "accrual_system_address")
-		t.Setenv("SECRET_KEY", " ")
-		cfg, err := CreateAppConfig([]string{})
-		assert.ErrorIs(t, err, errSecretKeyEmpty)
-		assert.Nil(t, cfg)
-	})
 }
 
 func TestParseFlags(t *testing.T) {
@@ -145,6 +135,78 @@ func TestParseFlags(t *testing.T) {
 
 		assert.Error(t, err)
 		assert.Nil(t, cfg)
+	})
+}
+
+func TestCreateAppConfig_SecretKeyFallback(t *testing.T) {
+	baseArgs := []string{"-a", "127.0.0.1:4444", "-d", "db_address", "-r", "accrual_system_address"}
+
+	t.Run("generates a key when neither flag nor env var is set", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "")
+		t.Setenv("DATABASE_URI", "")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "")
+
+		cfg, err := CreateAppConfig(baseArgs)
+		require.NoError(t, err)
+		assert.NotEmpty(t, cfg.SecretKey)
+	})
+
+	t.Run("generates a key when SECRET_KEY env var is set but blank", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "")
+		t.Setenv("DATABASE_URI", "")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "   ")
+
+		cfg, err := CreateAppConfig(baseArgs)
+		require.NoError(t, err)
+		assert.NotEmpty(t, cfg.SecretKey)
+	})
+
+	t.Run("generates a key when -k flag is blank and env var is unset", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "")
+		t.Setenv("DATABASE_URI", "")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "")
+
+		cfg, err := CreateAppConfig(append(baseArgs, "-k", "  "))
+		require.NoError(t, err)
+		assert.NotEmpty(t, cfg.SecretKey)
+	})
+
+	t.Run("uses the flag value when set and env var is unset", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "")
+		t.Setenv("DATABASE_URI", "")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "")
+
+		cfg, err := CreateAppConfig(append(baseArgs, "-k", "flag-secret"))
+		require.NoError(t, err)
+		assert.Equal(t, "flag-secret", cfg.SecretKey)
+	})
+
+	t.Run("env var overrides a non-blank flag value", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "")
+		t.Setenv("DATABASE_URI", "")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "env-secret")
+
+		cfg, err := CreateAppConfig(append(baseArgs, "-k", "flag-secret"))
+		require.NoError(t, err)
+		assert.Equal(t, "env-secret", cfg.SecretKey)
+	})
+
+	t.Run("two generated keys are different", func(t *testing.T) {
+		t.Setenv("RUN_ADDRESS", "")
+		t.Setenv("DATABASE_URI", "")
+		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
+		t.Setenv("SECRET_KEY", "")
+
+		cfg1, err := CreateAppConfig(baseArgs)
+		require.NoError(t, err)
+		cfg2, err := CreateAppConfig(baseArgs)
+		require.NoError(t, err)
+		assert.NotEqual(t, cfg1.SecretKey, cfg2.SecretKey)
 	})
 }
 
@@ -233,17 +295,17 @@ func TestParseConfig(t *testing.T) {
 		assert.ErrorIs(t, err, errAccrualSysAddr)
 	})
 
-	t.Run("should fail when secret key is empty", func(t *testing.T) {
+	t.Run("succeeds when secret key env var is blank (fallback happens at CreateAppConfig level, not here)", func(t *testing.T) {
 		t.Setenv("RUN_ADDRESS", "")
 		t.Setenv("DATABASE_URI", "")
 		t.Setenv("ACCRUAL_SYSTEM_ADDRESS", "")
 		t.Setenv("SECRET_KEY", "  ")
 
 		cfg, err := parseEnvConfig()
-		require.Nil(t, cfg)
-		require.NotNil(t, err)
-
-		assert.ErrorIs(t, err, errSecretKeyEmpty)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.SecretKey)
+		assert.Equal(t, "  ", *cfg.SecretKey)
 	})
 }
 
@@ -294,14 +356,14 @@ func TestValidateEnvConfig(t *testing.T) {
 			wantErr: errAccrualSysAddr,
 		},
 		{
-			name: "Secret key is an empty string",
+			name: "Secret key is an empty string — no longer a validation error",
 			cfg: envConfig{
 				Addr:           new("some-correct-addr"),
 				URI:            new("some-correct-dsn"),
 				AccrualSysAddr: new("some-correct-accrual-system-address"),
 				SecretKey:      new(""),
 			},
-			wantErr: errSecretKeyEmpty,
+			wantErr: nil,
 		},
 		{
 			name: "Variable as a whitespace-only string",
