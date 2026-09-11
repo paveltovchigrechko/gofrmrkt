@@ -84,16 +84,19 @@ func (db *Postgres) RegisterUser(ctx context.Context, login, passwordHash string
 }
 
 func (db *Postgres) GetUserByLogin(ctx context.Context, login string) (int64, string, error) {
-	query := `
-		SELECT id, password_hash
-		FROM users
-		WHERE login = $1
-	`
 	var (
 		userID       int64
 		passwordHash string
 	)
-	err := db.database.QueryRowContext(ctx, query, login).Scan(&userID, &passwordHash)
+
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		query := `
+			SELECT id, password_hash
+			FROM users
+			WHERE login = $1
+		`
+		return db.database.QueryRowContext(ctx, query, login).Scan(&userID, &passwordHash)
+	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return -1, "", ErrUserNotFound
@@ -139,35 +142,42 @@ func (db *Postgres) getOrderOwner(ctx context.Context, orderNumber string) (int6
 }
 
 func (db *Postgres) GetOrders(ctx context.Context, userID int64) ([]Order, error) {
-	query := `
-		SELECT number, status, accrual, uploaded_at
-		FROM orders
-		WHERE user_id = $1
-		ORDER BY uploaded_at DESC
-	`
-	rows, err := db.database.QueryContext(ctx, query, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var orders []Order
-	for rows.Next() {
-		var (
-			o       Order
-			accrual sql.NullFloat64
-		)
-		if err := rows.Scan(&o.Number, &o.Status, &accrual, &o.UploadedAt); err != nil {
-			return nil, err
-		}
-		if accrual.Valid {
-			v := accrual.Float64
-			o.Accrual = &v
-		}
-		orders = append(orders, o)
-	}
 
-	return orders, rows.Err()
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		orders = nil // discard any partial rows from a failed prior attempt
+
+		query := `
+			SELECT number, status, accrual, uploaded_at
+			FROM orders
+			WHERE user_id = $1
+			ORDER BY uploaded_at DESC
+		`
+		rows, err := db.database.QueryContext(ctx, query, userID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var (
+				o       Order
+				accrual sql.NullFloat64
+			)
+			if err := rows.Scan(&o.Number, &o.Status, &accrual, &o.UploadedAt); err != nil {
+				return err
+			}
+			if accrual.Valid {
+				v := accrual.Float64
+				o.Accrual = &v
+			}
+			orders = append(orders, o)
+		}
+
+		return rows.Err()
+	})
+
+	return orders, err
 }
 
 // --- balance / withdrawals ---
@@ -184,7 +194,15 @@ func getBalance(ctx context.Context, q queryer, userID int64) (current, withdraw
 }
 
 func (db *Postgres) GetBalance(ctx context.Context, userID int64) (float64, float64, error) {
-	return getBalance(ctx, db.database, userID)
+	var current, withdrawn float64
+
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		var err error
+		current, withdrawn, err = getBalance(ctx, db.database, userID)
+		return err
+	})
+
+	return current, withdrawn, err
 }
 
 func (db *Postgres) WithdrawBalance(ctx context.Context, userID int64, orderNumber string, sum float64) error {
@@ -199,56 +217,70 @@ func (db *Postgres) WithdrawBalance(ctx context.Context, userID int64, orderNumb
 }
 
 func (db *Postgres) GetWithdrawals(ctx context.Context, userID int64) ([]Withdrawal, error) {
-	query := `
-		SELECT order_number, sum, processed_at
-		FROM withdrawals
-		WHERE user_id = $1
-		ORDER BY processed_at DESC
-	`
-	rows, err := db.database.QueryContext(ctx, query, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var withdrawals []Withdrawal
-	for rows.Next() {
-		var w Withdrawal
-		if err := rows.Scan(&w.Order, &w.Sum, &w.ProcessedAt); err != nil {
-			return nil, err
-		}
-		withdrawals = append(withdrawals, w)
-	}
 
-	return withdrawals, rows.Err()
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		withdrawals = nil
+
+		query := `
+			SELECT order_number, sum, processed_at
+			FROM withdrawals
+			WHERE user_id = $1
+			ORDER BY processed_at DESC
+		`
+		rows, err := db.database.QueryContext(ctx, query, userID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var w Withdrawal
+			if err := rows.Scan(&w.Order, &w.Sum, &w.ProcessedAt); err != nil {
+				return err
+			}
+			withdrawals = append(withdrawals, w)
+		}
+
+		return rows.Err()
+	})
+
+	return withdrawals, err
 }
 
 // --- accrual-polling worker support ---
 
 func (db *Postgres) GetPendingOrders(ctx context.Context, limit int) ([]PendingOrder, error) {
-	query := `
-		SELECT number, user_id
-		FROM orders
-		WHERE status IN ('NEW', 'PROCESSING')
-		ORDER BY uploaded_at
-		LIMIT $1
-	`
-	rows, err := db.database.QueryContext(ctx, query, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var orders []PendingOrder
-	for rows.Next() {
-		var o PendingOrder
-		if err := rows.Scan(&o.Number, &o.UserID); err != nil {
-			return nil, err
-		}
-		orders = append(orders, o)
-	}
 
-	return orders, rows.Err()
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		orders = nil
+
+		query := `
+			SELECT number, user_id
+			FROM orders
+			WHERE status IN ('NEW', 'PROCESSING')
+			ORDER BY uploaded_at
+			LIMIT $1
+		`
+		rows, err := db.database.QueryContext(ctx, query, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var o PendingOrder
+			if err := rows.Scan(&o.Number, &o.UserID); err != nil {
+				return err
+			}
+			orders = append(orders, o)
+		}
+
+		return rows.Err()
+	})
+
+	return orders, err
 }
 
 func (db *Postgres) UpdateOrderStatus(ctx context.Context, orderNumber, status string, accrual *float64) error {
