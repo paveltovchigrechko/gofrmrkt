@@ -2,8 +2,11 @@ package accrual
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,8 +103,26 @@ func TestGetOrderInfo_RateLimited_MalformedHeader_DefaultsToOneSecond(t *testing
 	assert.Equal(t, time.Second, retryAfter)
 }
 
-func TestGetOrderInfo_UnexpectedStatus(t *testing.T) {
+func TestGetOrderInfo_UnexpectedStatus_NotRetried(t *testing.T) {
+	var callCount int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	info, _, err := client.GetOrderInfo(context.Background(), "123")
+
+	require.Error(t, err)
+	assert.Nil(t, info)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&callCount), "a non-5xx status must not be retried")
+}
+
+func TestGetOrderInfo_ServerError_RetriesThenFails(t *testing.T) {
+	var callCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
@@ -112,6 +133,35 @@ func TestGetOrderInfo_UnexpectedStatus(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, info)
 	assert.Contains(t, err.Error(), "500")
+	assert.Equal(t, int32(4), atomic.LoadInt32(&callCount), "expected 1 initial attempt + 3 retries")
+}
+
+func TestGetOrderInfo_ServerError_RetriesThenSucceeds(t *testing.T) {
+	var callCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&callCount, 1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(`{"order":"123","status":"PROCESSED","accrual":100}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	info, _, err := client.GetOrderInfo(context.Background(), "123")
+
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+}
+
+func TestIsRetriableAccrualError(t *testing.T) {
+	assert.False(t, isRetriableAccrualError(nil))
+	assert.False(t, isRetriableAccrualError(errors.New("unrelated")))
+	assert.False(t, isRetriableAccrualError(ErrOrderNotRegistered))
+	assert.False(t, isRetriableAccrualError(ErrTooManyRequests))
+	assert.True(t, isRetriableAccrualError(errTransientAccrualFailure))
+	assert.True(t, isRetriableAccrualError(fmt.Errorf("wrapped: %w", errTransientAccrualFailure)))
 }
 
 func TestGetOrderInfo_MalformedJSONBody(t *testing.T) {
