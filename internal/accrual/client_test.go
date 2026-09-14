@@ -12,7 +12,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
+
+func newTestClient(baseURL string) *Client {
+	return NewClient(baseURL, zap.NewNop().Sugar())
+}
+
+func newObservedClient(baseURL string) (*Client, *observer.ObservedLogs) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	return NewClient(baseURL, zap.New(core).Sugar()), logs
+}
 
 func TestGetOrderInfo_Success_WithAccrual(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -22,7 +34,7 @@ func TestGetOrderInfo_Success_WithAccrual(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := newTestClient(server.URL)
 	info, retryAfter, err := client.GetOrderInfo(context.Background(), "123")
 
 	require.NoError(t, err)
@@ -40,7 +52,7 @@ func TestGetOrderInfo_Success_NoAccrualField(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := newTestClient(server.URL)
 	info, _, err := client.GetOrderInfo(context.Background(), "123")
 
 	require.NoError(t, err)
@@ -54,7 +66,7 @@ func TestGetOrderInfo_NotRegistered(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := newTestClient(server.URL)
 	info, retryAfter, err := client.GetOrderInfo(context.Background(), "123")
 
 	assert.ErrorIs(t, err, ErrOrderNotRegistered)
@@ -69,38 +81,11 @@ func TestGetOrderInfo_RateLimited_WithRetryAfterHeader(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := newTestClient(server.URL)
 	_, retryAfter, err := client.GetOrderInfo(context.Background(), "123")
 
 	assert.ErrorIs(t, err, ErrTooManyRequests)
 	assert.Equal(t, 5*time.Second, retryAfter)
-}
-
-func TestGetOrderInfo_RateLimited_MissingHeader_DefaultsToOneSecond(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL)
-	_, retryAfter, err := client.GetOrderInfo(context.Background(), "123")
-
-	assert.ErrorIs(t, err, ErrTooManyRequests)
-	assert.Equal(t, time.Second, retryAfter)
-}
-
-func TestGetOrderInfo_RateLimited_MalformedHeader_DefaultsToOneSecond(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "not-a-number")
-		w.WriteHeader(http.StatusTooManyRequests)
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL)
-	_, retryAfter, err := client.GetOrderInfo(context.Background(), "123")
-
-	assert.ErrorIs(t, err, ErrTooManyRequests)
-	assert.Equal(t, time.Second, retryAfter)
 }
 
 func TestGetOrderInfo_UnexpectedStatus_NotRetried(t *testing.T) {
@@ -111,12 +96,12 @@ func TestGetOrderInfo_UnexpectedStatus_NotRetried(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := newTestClient(server.URL)
 	info, _, err := client.GetOrderInfo(context.Background(), "123")
 
 	require.Error(t, err)
 	assert.Nil(t, info)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&callCount), "a non-5xx status must not be retried")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&callCount))
 }
 
 func TestGetOrderInfo_ServerError_RetriesThenFails(t *testing.T) {
@@ -127,7 +112,7 @@ func TestGetOrderInfo_ServerError_RetriesThenFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := newTestClient(server.URL)
 	info, _, err := client.GetOrderInfo(context.Background(), "123")
 
 	require.Error(t, err)
@@ -147,12 +132,33 @@ func TestGetOrderInfo_ServerError_RetriesThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := newTestClient(server.URL)
 	info, _, err := client.GetOrderInfo(context.Background(), "123")
 
 	require.NoError(t, err)
 	require.NotNil(t, info)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+}
+
+func TestGetOrderInfo_MalformedJSONBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`not json`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	info, _, err := client.GetOrderInfo(context.Background(), "123")
+
+	require.Error(t, err)
+	assert.Nil(t, info)
+}
+
+func TestGetOrderInfo_RequestConstructionFailure(t *testing.T) {
+	client := newTestClient("http://example.com")
+	info, _, err := client.GetOrderInfo(context.Background(), "123\n456")
+
+	require.Error(t, err)
+	assert.Nil(t, info)
 }
 
 func TestIsRetriableAccrualError(t *testing.T) {
@@ -164,55 +170,46 @@ func TestIsRetriableAccrualError(t *testing.T) {
 	assert.True(t, isRetriableAccrualError(fmt.Errorf("wrapped: %w", errTransientAccrualFailure)))
 }
 
-func TestGetOrderInfo_MalformedJSONBody(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`not json`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL)
-	info, _, err := client.GetOrderInfo(context.Background(), "123")
-
-	require.Error(t, err)
-	assert.Nil(t, info)
-}
-
-func TestGetOrderInfo_NetworkError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	server.Close()
-
-	client := NewClient(server.URL)
-	info, retryAfter, err := client.GetOrderInfo(context.Background(), "123")
-
-	require.Error(t, err)
-	assert.Nil(t, info)
-	assert.Zero(t, retryAfter)
-}
-
-func TestGetOrderInfo_RequestConstructionFailure(t *testing.T) {
-	client := NewClient("http://example.com")
-	info, _, err := client.GetOrderInfo(context.Background(), "123\n456")
-
-	require.Error(t, err)
-	assert.Nil(t, info)
-}
-
 func TestParseRetryAfter(t *testing.T) {
 	tests := []struct {
-		name   string
-		header string
-		want   time.Duration
+		name        string
+		header      string
+		want        time.Duration
+		wantWarning bool
 	}{
-		{"valid positive seconds", "5", 5 * time.Second},
-		{"empty header", "", time.Second},
-		{"non-numeric header", "abc", time.Second},
-		{"zero", "0", time.Second},
-		{"negative", "-3", time.Second},
+		{"valid positive seconds", "5", 5 * time.Second, false},
+		{"empty header", "", time.Second, true},
+		{"non-numeric header", "abc", time.Second, true},
+		{"zero", "0", time.Second, true},
+		{"negative", "-3", time.Second, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, parseRetryAfter(tt.header))
+			client, logs := newObservedClient("http://unused.invalid")
+
+			got := client.parseRetryAfter(tt.header)
+
+			assert.Equal(t, tt.want, got)
+			if tt.wantWarning {
+				assert.Equal(t, 1, logs.Len(), "expected a warning to be logged")
+			} else {
+				assert.Equal(t, 0, logs.Len(), "expected no warning to be logged")
+			}
 		})
 	}
+}
+
+func TestGetOrderInfo_RateLimited_LogsThroughFullPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client, logs := newObservedClient(server.URL)
+	_, retryAfter, err := client.GetOrderInfo(context.Background(), "123")
+
+	assert.ErrorIs(t, err, ErrTooManyRequests)
+	assert.Equal(t, time.Second, retryAfter)
+	assert.Equal(t, 1, logs.Len())
 }

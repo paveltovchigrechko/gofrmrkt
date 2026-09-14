@@ -74,7 +74,7 @@ func (m *mockStorage) Close() error { return nil }
 func newTestWorker(storage repo.Storage, accrualBaseURL string) *AccrualWorker {
 	return &AccrualWorker{
 		storage:  storage,
-		client:   accrual.NewClient(accrualBaseURL),
+		client:   accrual.NewClient(accrualBaseURL, zap.NewNop().Sugar()),
 		logger:   zap.NewNop().Sugar(),
 		interval: 10 * time.Millisecond,
 		batch:    10,
@@ -300,7 +300,7 @@ func TestRun_PollsRepeatedlyUntilContextCanceled(t *testing.T) {
 
 	w := &AccrualWorker{
 		storage:  storage,
-		client:   accrual.NewClient("http://unused.invalid"),
+		client:   accrual.NewClient("http://unused.invalid", zap.NewNop().Sugar()),
 		logger:   zap.NewNop().Sugar(),
 		interval: 10 * time.Millisecond,
 		batch:    10,

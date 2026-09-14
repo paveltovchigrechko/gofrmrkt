@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/paveltovchigrechko/gofrmrkt/internal/service/retry"
+	"go.uber.org/zap"
 )
 
 var (
@@ -32,12 +33,14 @@ type OrderInfo struct {
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	logger     *zap.SugaredLogger
 }
 
-func NewClient(baseURL string) *Client {
+func NewClient(baseURL string, logger *zap.SugaredLogger) *Client {
 	return &Client{
 		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: 5 * time.Second},
+		logger:     logger,
 	}
 }
 
@@ -83,7 +86,7 @@ func (c *Client) GetOrderInfo(ctx context.Context, orderNumber string) (*OrderIn
 			return ErrOrderNotRegistered
 
 		case resp.StatusCode == http.StatusTooManyRequests:
-			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+			retryAfter = c.parseRetryAfter(resp.Header.Get("Retry-After"))
 			return ErrTooManyRequests
 
 		case resp.StatusCode >= 500 && resp.StatusCode <= 599:
@@ -101,10 +104,17 @@ func isRetriableAccrualError(err error) bool {
 	return errors.Is(err, errTransientAccrualFailure)
 }
 
-func parseRetryAfter(header string) time.Duration {
-	seconds, err := strconv.Atoi(header)
-	if err != nil || seconds <= 0 {
+func (c *Client) parseRetryAfter(header string) time.Duration {
+	if header == "" {
+		c.logger.Warnw("accrual client: Retry-After header missing on 429 response, using default", "default", time.Second)
 		return time.Second
 	}
+
+	seconds, err := strconv.Atoi(header)
+	if err != nil || seconds <= 0 {
+		c.logger.Warnw("accrual client: Retry-After header has invalid value, using default", "value", header, "default", time.Second)
+		return time.Second
+	}
+
 	return time.Duration(seconds) * time.Second
 }

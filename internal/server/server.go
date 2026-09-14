@@ -57,7 +57,7 @@ func New(cfg *config.AppConfig, logger *zap.SugaredLogger, storage repo.Storage)
 		r.Get("/api/user/withdrawals", h.GetWithdrawals)
 	})
 
-	accrualClient := accrual.NewClient(cfg.AccrualSysAddr)
+	accrualClient := accrual.NewClient(cfg.AccrualSysAddr, logger)
 	accrualWorker := worker.NewAccrualWorker(storage, accrualClient, logger)
 
 	return &Server{
