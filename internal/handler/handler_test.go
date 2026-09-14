@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type mockStorage struct {
@@ -675,4 +677,41 @@ func TestAuthenticateUser_TokenIssueFails(t *testing.T) {
 	h.AuthenticateUser(rec, req)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestFail_DoesNotLogClientErrors(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	h := &AppHandler{logger: zap.New(core).Sugar()}
+
+	rec := httptest.NewRecorder()
+	h.fail(rec, http.StatusBadRequest, "some client mistake", errors.New("bad input"))
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, 0, logs.Len(), "4xx responses must not be logged")
+}
+
+func TestFail_LogsServerErrors(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	h := &AppHandler{logger: zap.New(core).Sugar()}
+
+	rec := httptest.NewRecorder()
+	h.fail(rec, http.StatusInternalServerError, "some internal failure", errors.New("db down"))
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, 1, logs.Len())
+	assert.Equal(t, zapcore.ErrorLevel, logs.All()[0].Level)
+}
+
+func TestUploadOrder_MissingUserID_LogsWiringWarning(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	h := New(&mockStorage{}, zap.New(core).Sugar(), &stubTokenIssuer{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/user/orders", strings.NewReader("12345678903"))
+	rec := httptest.NewRecorder()
+
+	h.UploadOrder(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, 1, logs.Len(), "the wiring-bug case must still be logged despite being a 401")
+	assert.Equal(t, zapcore.ErrorLevel, logs.All()[0].Level)
 }

@@ -115,6 +115,7 @@ func (h *AppHandler) AuthenticateUser(w http.ResponseWriter, r *http.Request) {
 func (h *AppHandler) UploadOrder(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
+		h.logger.Errorw("upload order: authenticated route reached without user id in context — check router wiring")
 		h.fail(w, http.StatusUnauthorized, "upload order: missing user id in context", nil)
 		return
 	}
@@ -278,10 +279,12 @@ func (h *AppHandler) authenticate(w http.ResponseWriter, userID int64) error {
 }
 
 func (h *AppHandler) fail(w http.ResponseWriter, status int, msg string, err error) {
-	if err != nil {
-		h.logger.Errorw(msg, "error", err)
-	} else {
-		h.logger.Warnw(msg)
+	if status >= http.StatusInternalServerError {
+		if err != nil {
+			h.logger.Errorw(msg, "error", err)
+		} else {
+			h.logger.Errorw(msg)
+		}
 	}
 	w.WriteHeader(status)
 }
