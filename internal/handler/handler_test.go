@@ -619,3 +619,60 @@ func TestGetWithdrawals_NonEmpty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "12345678903")
 }
+
+type stubTokenIssuer struct {
+	buildJWTStringFn func(userID int64) (string, error)
+}
+
+func (s *stubTokenIssuer) BuildJWTString(userID int64) (string, error) {
+	return s.buildJWTStringFn(userID)
+}
+
+func newTestHandlerWithAuth(storage *mockStorage, authSvc TokenIssuer) *AppHandler {
+	return New(storage, zap.NewNop().Sugar(), authSvc)
+}
+
+func TestRegisterUser_TokenIssueFails(t *testing.T) {
+	storage := &mockStorage{
+		registerUserFn: func(ctx context.Context, login, passwordHash string) (int64, error) {
+			return 1, nil
+		},
+	}
+	authSvc := &stubTokenIssuer{
+		buildJWTStringFn: func(userID int64) (string, error) {
+			return "", errors.New("signing failed")
+		},
+	}
+	h := newTestHandlerWithAuth(storage, authSvc)
+
+	req := jsonRequest(http.MethodPost, "/api/user/register", `{"login":"alice","password":"secret123"}`)
+	rec := httptest.NewRecorder()
+
+	h.RegisterUser(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestAuthenticateUser_TokenIssueFails(t *testing.T) {
+	hash, err := service.HashPassword("correct-password")
+	require.NoError(t, err)
+
+	storage := &mockStorage{
+		getUserByLoginFn: func(ctx context.Context, login string) (int64, string, error) {
+			return 1, hash, nil
+		},
+	}
+	authSvc := &stubTokenIssuer{
+		buildJWTStringFn: func(userID int64) (string, error) {
+			return "", errors.New("signing failed")
+		},
+	}
+	h := newTestHandlerWithAuth(storage, authSvc)
+
+	req := jsonRequest(http.MethodPost, "/api/user/login", `{"login":"alice","password":"correct-password"}`)
+	rec := httptest.NewRecorder()
+
+	h.AuthenticateUser(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}

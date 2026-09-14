@@ -17,13 +17,17 @@ const authCookieName = "token"
 
 var errEmptyCredentials = errors.New("login or password is empty")
 
+type TokenIssuer interface {
+	BuildJWTString(userID int64) (string, error)
+}
+
 type AppHandler struct {
 	db      repo.Storage
 	logger  *zap.SugaredLogger
-	authSvc *service.AuthService
+	authSvc TokenIssuer
 }
 
-func New(db repo.Storage, logger *zap.SugaredLogger, authSvc *service.AuthService) *AppHandler {
+func New(db repo.Storage, logger *zap.SugaredLogger, authSvc TokenIssuer) *AppHandler {
 	return &AppHandler{
 		db:      db,
 		logger:  logger,
