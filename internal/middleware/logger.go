@@ -22,10 +22,6 @@ type (
 	}
 )
 
-type ErrorRecorder interface {
-	SetError(error)
-}
-
 func (r *loggingResponseWriter) Write(b []byte) (int, error) {
 	if r.responseData.status == 0 {
 		r.WriteHeader(http.StatusOK)
