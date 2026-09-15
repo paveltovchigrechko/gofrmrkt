@@ -89,8 +89,8 @@ func neverCalledClient(t *testing.T) *stubAccrualClient {
 	t.Helper()
 	return &stubAccrualClient{
 		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
-			t.Fatalf("accrual client should not have been called, got order %q", orderNumber)
-			return nil, 0, nil
+			t.Errorf("accrual client should not have been called, got order %q", orderNumber)
+			return nil, 0, errors.New("unexpected call in test")
 		},
 	}
 }
@@ -103,7 +103,8 @@ func mapAccrualClient(t *testing.T, responses map[string]func() (*accrual.OrderI
 		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
 			respond, ok := responses[orderNumber]
 			if !ok {
-				t.Fatalf("unexpected accrual lookup for order %q", orderNumber)
+				t.Errorf("unexpected accrual lookup for order %q", orderNumber)
+				return nil, 0, errors.New("unexpected order in test")
 			}
 			return respond()
 		},
@@ -113,13 +114,10 @@ func mapAccrualClient(t *testing.T, responses map[string]func() (*accrual.OrderI
 // --- test helper ---
 
 func newTestWorker(storage repo.Storage, client AccrualClient) *AccrualWorker {
-	return &AccrualWorker{
-		storage:  storage,
-		client:   client,
-		logger:   zap.NewNop().Sugar(),
-		interval: 10 * time.Millisecond,
-		batch:    10,
-	}
+	w := NewAccrualWorker(storage, client, zap.NewNop().Sugar())
+	w.interval = 10 * time.Millisecond
+	w.batch = 10
+	return w
 }
 
 func floatPtr(v float64) *float64 { return &v }
@@ -266,24 +264,26 @@ func TestPollOnce_MultipleOrders_ProcessesAllWhenNoRateLimit(t *testing.T) {
 
 	calls := storage.calls()
 	require.Len(t, calls, 2)
-	assert.Equal(t, "111", calls[0].orderNumber)
-	assert.Equal(t, "222", calls[1].orderNumber)
-	assert.Equal(t, "INVALID", calls[1].status)
+
+	byOrder := make(map[string]updateCall, 2)
+	for _, c := range calls {
+		byOrder[c.orderNumber] = c
+	}
+	require.Contains(t, byOrder, "111")
+	require.Contains(t, byOrder, "222")
+	assert.Equal(t, "PROCESSED", byOrder["111"].status)
+	assert.Equal(t, "INVALID", byOrder["222"].status)
 }
 
-func TestPollOnce_RateLimited_StopsBatchAndReturnsEarlyOnCancellation(t *testing.T) {
-	// Retry-After is large (10s) to prove the test relies on context
-	// cancellation to return quickly, not on the wait completing.
-	client := mapAccrualClient(t, map[string]func() (*accrual.OrderInfo, time.Duration, error){
-		"111": func() (*accrual.OrderInfo, time.Duration, error) {
+func TestPollOnce_RateLimited_SetsWorkerLevelPause(t *testing.T) {
+	client := &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
 			return nil, 10 * time.Second, accrual.ErrTooManyRequests
 		},
-		// "222" intentionally absent: mapAccrualClient fails the test if
-		// the worker ever queries it after the 429 on "111".
-	})
+	}
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
-			return []repo.PendingOrder{{Number: "111"}, {Number: "222"}}, nil
+			return []repo.PendingOrder{{Number: "111"}}, nil
 		},
 	}
 	w := newTestWorker(storage, client)
@@ -291,12 +291,25 @@ func TestPollOnce_RateLimited_StopsBatchAndReturnsEarlyOnCancellation(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
-	start := time.Now()
 	w.pollOnce(ctx)
-	elapsed := time.Since(start)
 
-	assert.Less(t, elapsed, 500*time.Millisecond, "pollOnce should return promptly on context cancellation")
-	assert.Empty(t, storage.calls())
+	assert.True(t, w.gate.resumeAt.After(time.Now()), "the pause must still be in effect")
+}
+
+func TestPollOnce_ActivePause_SkipsAllOrdersWithoutCallingClient(t *testing.T) {
+	client := neverCalledClient(t)
+	storage := &mockStorage{
+		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
+			return []repo.PendingOrder{{Number: "111"}, {Number: "222"}}, nil
+		},
+	}
+	w := newTestWorker(storage, client)
+	w.gate.pause(10 * time.Second) // simulating a pause set by a previous poll cycle
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	w.pollOnce(ctx) // must return via cancellation, never reaching the client
 }
 
 // TestPollOnce_Integration_RealAccrualClient is the one test in this file
@@ -361,4 +374,47 @@ func TestRun_PollsRepeatedlyUntilContextCanceled(t *testing.T) {
 
 	assert.GreaterOrEqual(t, count, 2, "expected at least 2 polls in the given window")
 	assert.Less(t, elapsed, 200*time.Millisecond, "Run should return promptly after context cancellation")
+}
+
+func TestRateLimitGate_WaitReturnsImmediatelyWhenNotPaused(t *testing.T) {
+	g := &rateLimitGate{}
+	start := time.Now()
+	g.wait(context.Background())
+	assert.Less(t, time.Since(start), 50*time.Millisecond)
+}
+
+func TestRateLimitGate_PauseBlocksWaitUntilElapsed(t *testing.T) {
+	g := &rateLimitGate{}
+	g.pause(50 * time.Millisecond)
+
+	start := time.Now()
+	g.wait(context.Background())
+	elapsed := time.Since(start)
+
+	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond)
+	assert.Less(t, elapsed, 500*time.Millisecond)
+}
+
+func TestRateLimitGate_PauseDoesNotShortenALongerActivePause(t *testing.T) {
+	g := &rateLimitGate{}
+	g.pause(200 * time.Millisecond)
+	g.pause(10 * time.Millisecond)
+
+	start := time.Now()
+	g.wait(context.Background())
+	elapsed := time.Since(start)
+
+	assert.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "a shorter pause must not override a longer one already active")
+}
+
+func TestRateLimitGate_WaitReturnsOnContextCancellation(t *testing.T) {
+	g := &rateLimitGate{}
+	g.pause(10 * time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	g.wait(ctx)
+	assert.Less(t, time.Since(start), 500*time.Millisecond)
 }

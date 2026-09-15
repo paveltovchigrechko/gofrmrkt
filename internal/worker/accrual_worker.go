@@ -3,16 +3,12 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/paveltovchigrechko/gofrmrkt/internal/accrual"
 	"github.com/paveltovchigrechko/gofrmrkt/internal/repo"
 	"go.uber.org/zap"
-)
-
-const (
-	defaultPollInterval = time.Second
-	defaultBatchSize    = 100
 )
 
 // statusMap translates the accrual system's own status vocabulary into the
@@ -28,11 +24,11 @@ var statusMap = map[string]string{
 	"PROCESSED":  "PROCESSED",
 }
 
-type AccrualClient interface {
-	GetOrderInfo(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error)
-}
-
-var _ AccrualClient = (*accrual.Client)(nil)
+const (
+	defaultPollInterval   = time.Second
+	defaultBatchSize      = 100
+	defaultWorkerPoolSize = 5 // not specified by the review comment or spec — a starting point, tune against the real accrual system's actual capacity
+)
 
 type AccrualWorker struct {
 	storage  repo.Storage
@@ -40,6 +36,8 @@ type AccrualWorker struct {
 	logger   *zap.SugaredLogger
 	interval time.Duration
 	batch    int
+	poolSize int
+	gate     *rateLimitGate
 }
 
 func NewAccrualWorker(storage repo.Storage, client AccrualClient, logger *zap.SugaredLogger) *AccrualWorker {
@@ -49,11 +47,11 @@ func NewAccrualWorker(storage repo.Storage, client AccrualClient, logger *zap.Su
 		logger:   logger,
 		interval: defaultPollInterval,
 		batch:    defaultBatchSize,
+		poolSize: defaultWorkerPoolSize,
+		gate:     &rateLimitGate{},
 	}
 }
 
-// Run polls pending orders until ctx is canceled. Intended to be launched
-// in its own goroutine by the caller.
 func (w *AccrualWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
@@ -74,28 +72,54 @@ func (w *AccrualWorker) pollOnce(ctx context.Context) {
 		w.logger.Errorw("accrual worker: fetch pending orders", "error", err)
 		return
 	}
+	if len(orders) == 0 {
+		return
+	}
 
-	for _, order := range orders {
-		info, retryAfter, err := w.client.GetOrderInfo(ctx, order.Number)
+	jobs := make(chan repo.PendingOrder, len(orders))
+	for _, o := range orders {
+		jobs <- o
+	}
+	close(jobs)
 
-		switch {
-		case err == nil:
-			w.applyOrderInfo(ctx, info)
+	poolSize := w.poolSize
+	if poolSize > len(orders) {
+		poolSize = len(orders)
+	}
 
-		case errors.Is(err, accrual.ErrTooManyRequests):
-			w.logger.Warnw("accrual worker: rate limited, pausing batch", "retry_after", retryAfter)
-			select {
-			case <-ctx.Done():
-			case <-time.After(retryAfter):
+	var wg sync.WaitGroup
+	wg.Add(poolSize)
+	for i := 0; i < poolSize; i++ {
+		go func() {
+			defer wg.Done()
+			for order := range jobs {
+				w.gate.wait(ctx)
+				if ctx.Err() != nil {
+					return
+				}
+				w.processOrder(ctx, order)
 			}
-			return // stop this batch entirely; resume from the next tick
+		}()
+	}
+	wg.Wait()
+}
 
-		case errors.Is(err, accrual.ErrOrderNotRegistered):
-			continue // not yet known to accrual; try again next poll
+func (w *AccrualWorker) processOrder(ctx context.Context, order repo.PendingOrder) {
+	info, retryAfter, err := w.client.GetOrderInfo(ctx, order.Number)
 
-		default:
-			w.logger.Errorw("accrual worker: query order", "order", order.Number, "error", err)
-		}
+	switch {
+	case err == nil:
+		w.applyOrderInfo(ctx, info)
+
+	case errors.Is(err, accrual.ErrTooManyRequests):
+		w.logger.Warnw("accrual worker: rate limited, pausing pool", "retry_after", retryAfter)
+		w.gate.pause(retryAfter)
+
+	case errors.Is(err, accrual.ErrOrderNotRegistered):
+		// not yet known to accrual; try again next poll
+
+	default:
+		w.logger.Errorw("accrual worker: query order", "order", order.Number, "error", err)
 	}
 }
 
@@ -105,8 +129,48 @@ func (w *AccrualWorker) applyOrderInfo(ctx context.Context, info *accrual.OrderI
 		w.logger.Warnw("accrual worker: unrecognized status from accrual system", "status", info.Status)
 		return
 	}
-
 	if err := w.storage.UpdateOrderStatus(ctx, info.Order, status, info.Accrual); err != nil {
 		w.logger.Errorw("accrual worker: update order status", "order", info.Order, "error", err)
+	}
+}
+
+type AccrualClient interface {
+	GetOrderInfo(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error)
+}
+
+var _ AccrualClient = (*accrual.Client)(nil)
+
+type rateLimitGate struct {
+	mu       sync.Mutex
+	resumeAt time.Time
+}
+
+func (g *rateLimitGate) wait(ctx context.Context) {
+	for {
+		g.mu.Lock()
+		resumeAt := g.resumeAt
+		g.mu.Unlock()
+
+		remaining := time.Until(resumeAt)
+		if remaining <= 0 {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(remaining):
+			// loop: another worker may have extended the pause meanwhile
+		}
+	}
+}
+
+// pause extends the shared pause window to at least now+d, without
+// shortening a longer pause already set by another worker's 429.
+func (g *rateLimitGate) pause(d time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if candidate := time.Now().Add(d); candidate.After(g.resumeAt) {
+		g.resumeAt = candidate
 	}
 }
