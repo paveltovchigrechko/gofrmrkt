@@ -32,3 +32,4 @@ CREATE TABLE withdrawals (
 );
 
 CREATE INDEX idx_withdrawals_user_id_processed ON withdrawals(user_id, processed_at DESC);
+CREATE INDEX idx_orders_status_uploaded ON orders(status, uploaded_at DESC);
