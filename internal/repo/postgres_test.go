@@ -97,9 +97,11 @@ func TestPostgres_GetUserByLogin_NotFound(t *testing.T) {
 func TestPostgres_UploadOrder_New(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	err := pg.UploadOrder(context.Background(), 1, "12345")
 	assert.NoError(t, err)
@@ -108,13 +110,14 @@ func TestPostgres_UploadOrder_New(t *testing.T) {
 func TestPostgres_UploadOrder_SameUser(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(uniqueViolationErr())
-
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT user_id FROM orders WHERE number = $1`)).
 		WithArgs("12345").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
+	mock.ExpectCommit()
 
 	err := pg.UploadOrder(context.Background(), 1, "12345")
 	assert.ErrorIs(t, err, ErrOrderAlreadyUploaded)
@@ -123,13 +126,14 @@ func TestPostgres_UploadOrder_SameUser(t *testing.T) {
 func TestPostgres_UploadOrder_DifferentUser(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(2)).
 		WillReturnError(uniqueViolationErr())
-
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT user_id FROM orders WHERE number = $1`)).
 		WithArgs("12345").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
+	mock.ExpectCommit()
 
 	err := pg.UploadOrder(context.Background(), 2, "12345")
 	assert.ErrorIs(t, err, ErrOrderOwnedByAnotherUser)
@@ -138,14 +142,15 @@ func TestPostgres_UploadOrder_DifferentUser(t *testing.T) {
 func TestPostgres_UploadOrder_OwnerLookupFails(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
+	lookupErr := errors.New("lookup failed")
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(uniqueViolationErr())
-
-	lookupErr := errors.New("lookup failed")
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT user_id FROM orders WHERE number = $1`)).
 		WithArgs("12345").
 		WillReturnError(lookupErr)
+	mock.ExpectRollback()
 
 	err := pg.UploadOrder(context.Background(), 1, "12345")
 	assert.ErrorIs(t, err, lookupErr)
@@ -155,9 +160,11 @@ func TestPostgres_UploadOrder_OtherDBError(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	dbErr := errors.New("connection reset")
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(dbErr)
+	mock.ExpectRollback()
 
 	err := pg.UploadOrder(context.Background(), 1, "12345")
 	assert.ErrorIs(t, err, dbErr)
@@ -586,17 +593,21 @@ func TestPostgres_UploadOrder_RetriesOnConnectionError_ThenSucceeds(t *testing.T
 	pg, mock := newMockPostgres(t)
 	retriableErr := &pgconn.PgError{Code: "08006"}
 
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(retriableErr)
+	mock.ExpectRollback()
+
+	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	err := pg.UploadOrder(context.Background(), 1, "12345")
 	assert.NoError(t, err)
 }
-
 func TestPostgres_UpdateOrderStatus_RetriesOnConnectionError_ThenSucceeds(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 	retriableErr := &pgconn.PgError{Code: "08006"}

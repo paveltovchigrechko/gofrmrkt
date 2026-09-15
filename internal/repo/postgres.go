@@ -113,41 +113,47 @@ func (db *Postgres) GetUserByLogin(ctx context.Context, login string) (int64, st
 // --- orders ---
 
 func (db *Postgres) UploadOrder(ctx context.Context, userID int64, orderNumber string) error {
-	err := retry.Do(ctx, isRetriableDBError, func() error {
-		query := `
+	return retry.Do(ctx, isRetriableDBError, func() error {
+		tx, err := db.database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		insertQuery := `
 			INSERT INTO orders (number, user_id)
 			VALUES ($1, $2)
 		`
-		_, err := db.database.ExecContext(ctx, query, orderNumber, userID)
-		return err
+		_, err = tx.ExecContext(ctx, insertQuery, orderNumber, userID)
+		if err == nil {
+			return tx.Commit()
+		}
+
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
+			return err
+		}
+
+		ownerID, scanErr := getOrderOwner(ctx, tx, orderNumber)
+		if scanErr != nil {
+			return scanErr
+		}
+
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+
+		if ownerID == userID {
+			return ErrOrderAlreadyUploaded
+		}
+		return ErrOrderOwnedByAnotherUser
 	})
-	if err == nil {
-		return nil
-	}
-
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
-		return err
-	}
-
-	ownerID, lookupErr := db.getOrderOwner(ctx, orderNumber)
-	if lookupErr != nil {
-		return lookupErr
-	}
-	if ownerID == userID {
-		return ErrOrderAlreadyUploaded
-	}
-	return ErrOrderOwnedByAnotherUser
 }
 
-func (db *Postgres) getOrderOwner(ctx context.Context, orderNumber string) (int64, error) {
+func getOrderOwner(ctx context.Context, q queryer, orderNumber string) (int64, error) {
 	var userID int64
-
-	err := retry.Do(ctx, isRetriableDBError, func() error {
-		query := `SELECT user_id FROM orders WHERE number = $1`
-		return db.database.QueryRowContext(ctx, query, orderNumber).Scan(&userID)
-	})
-
+	query := `SELECT user_id FROM orders WHERE number = $1`
+	err := q.QueryRowContext(ctx, query, orderNumber).Scan(&userID)
 	return userID, err
 }
 
