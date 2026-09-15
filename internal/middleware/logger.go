@@ -1,8 +1,6 @@
 package middleware
 
 import (
-	"bytes"
-	"io"
 	"net/http"
 	"time"
 
@@ -71,16 +69,6 @@ func Logger(log *zap.SugaredLogger) func(http.Handler) http.Handler {
 				responseData:   responseData,
 			}
 
-			var bodyBytes []byte
-			if r.Body != nil {
-				var err error
-				bodyBytes, err = io.ReadAll(r.Body)
-				if err != nil {
-					log.Errorw("Failed to read request body for logging", "error", err)
-				}
-				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			}
-
 			ct := r.Header.Get("Content-Type")
 			ce := r.Header.Get("Content-Encoding")
 			next.ServeHTTP(&lw, r)
@@ -91,7 +79,6 @@ func Logger(log *zap.SugaredLogger) func(http.Handler) http.Handler {
 				"request completed",
 				"uri", r.RequestURI,
 				"method", r.Method,
-				"request body", string(bodyBytes),
 				"request content type", ct,
 				"request content encoding", ce,
 				"response status", responseData.status,
