@@ -565,3 +565,50 @@ func TestPostgres_UpdateOrderStatus_Error(t *testing.T) {
 	err := pg.UpdateOrderStatus(context.Background(), "12345", "PROCESSED", nil)
 	assert.ErrorIs(t, err, dbErr)
 }
+
+func TestPostgres_RegisterUser_RetriesOnConnectionError_ThenSucceeds(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+	retriableErr := &pgconn.PgError{Code: "08006"}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO users (login, password_hash)`)).
+		WithArgs("alice", "hash").
+		WillReturnError(retriableErr)
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO users (login, password_hash)`)).
+		WithArgs("alice", "hash").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(1)))
+
+	id, err := pg.RegisterUser(context.Background(), "alice", "hash")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), id)
+}
+
+func TestPostgres_UploadOrder_RetriesOnConnectionError_ThenSucceeds(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+	retriableErr := &pgconn.PgError{Code: "08006"}
+
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
+		WithArgs("12345", int64(1)).
+		WillReturnError(retriableErr)
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
+		WithArgs("12345", int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	err := pg.UploadOrder(context.Background(), 1, "12345")
+	assert.NoError(t, err)
+}
+
+func TestPostgres_UpdateOrderStatus_RetriesOnConnectionError_ThenSucceeds(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+	retriableErr := &pgconn.PgError{Code: "08006"}
+	accrual := 500.0
+
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE orders`)).
+		WithArgs("PROCESSED", &accrual, "12345").
+		WillReturnError(retriableErr)
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE orders`)).
+		WithArgs("PROCESSED", &accrual, "12345").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	err := pg.UpdateOrderStatus(context.Background(), "12345", "PROCESSED", &accrual)
+	assert.NoError(t, err)
+}

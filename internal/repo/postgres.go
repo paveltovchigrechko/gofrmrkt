@@ -65,13 +65,16 @@ func (db *Postgres) Close() error {
 // --- users ---
 
 func (db *Postgres) RegisterUser(ctx context.Context, login, passwordHash string) (int64, error) {
-	query := `
-		INSERT INTO users (login, password_hash)
-		VALUES ($1, $2)
-		RETURNING id
-	`
 	var userID int64
-	err := db.database.QueryRowContext(ctx, query, login, passwordHash).Scan(&userID)
+
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		query := `
+			INSERT INTO users (login, password_hash)
+			VALUES ($1, $2)
+			RETURNING id
+		`
+		return db.database.QueryRowContext(ctx, query, login, passwordHash).Scan(&userID)
+	})
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
@@ -110,11 +113,14 @@ func (db *Postgres) GetUserByLogin(ctx context.Context, login string) (int64, st
 // --- orders ---
 
 func (db *Postgres) UploadOrder(ctx context.Context, userID int64, orderNumber string) error {
-	query := `
-		INSERT INTO orders (number, user_id)
-		VALUES ($1, $2)
-	`
-	_, err := db.database.ExecContext(ctx, query, orderNumber, userID)
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		query := `
+			INSERT INTO orders (number, user_id)
+			VALUES ($1, $2)
+		`
+		_, err := db.database.ExecContext(ctx, query, orderNumber, userID)
+		return err
+	})
 	if err == nil {
 		return nil
 	}
@@ -136,8 +142,12 @@ func (db *Postgres) UploadOrder(ctx context.Context, userID int64, orderNumber s
 
 func (db *Postgres) getOrderOwner(ctx context.Context, orderNumber string) (int64, error) {
 	var userID int64
-	query := `SELECT user_id FROM orders WHERE number = $1`
-	err := db.database.QueryRowContext(ctx, query, orderNumber).Scan(&userID)
+
+	err := retry.Do(ctx, isRetriableDBError, func() error {
+		query := `SELECT user_id FROM orders WHERE number = $1`
+		return db.database.QueryRowContext(ctx, query, orderNumber).Scan(&userID)
+	})
+
 	return userID, err
 }
 
@@ -284,13 +294,15 @@ func (db *Postgres) GetPendingOrders(ctx context.Context, limit int) ([]PendingO
 }
 
 func (db *Postgres) UpdateOrderStatus(ctx context.Context, orderNumber, status string, accrual *float64) error {
-	query := `
-		UPDATE orders
-		SET status = $1, accrual = $2, updated_at = NOW()
-		WHERE number = $3
-	`
-	_, err := db.database.ExecContext(ctx, query, status, accrual, orderNumber)
-	return err
+	return retry.Do(ctx, isRetriableDBError, func() error {
+		query := `
+			UPDATE orders
+			SET status = $1, accrual = $2, updated_at = NOW()
+			WHERE number = $3
+		`
+		_, err := db.database.ExecContext(ctx, query, status, accrual, orderNumber)
+		return err
+	})
 }
 
 func openDB(databaseDSN string) (*sql.DB, error) {
