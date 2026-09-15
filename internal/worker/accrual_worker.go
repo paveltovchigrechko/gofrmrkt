@@ -28,15 +28,21 @@ var statusMap = map[string]string{
 	"PROCESSED":  "PROCESSED",
 }
 
+type AccrualClient interface {
+	GetOrderInfo(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error)
+}
+
+var _ AccrualClient = (*accrual.Client)(nil)
+
 type AccrualWorker struct {
 	storage  repo.Storage
-	client   *accrual.Client
+	client   AccrualClient
 	logger   *zap.SugaredLogger
 	interval time.Duration
 	batch    int
 }
 
-func NewAccrualWorker(storage repo.Storage, client *accrual.Client, logger *zap.SugaredLogger) *AccrualWorker {
+func NewAccrualWorker(storage repo.Storage, client AccrualClient, logger *zap.SugaredLogger) *AccrualWorker {
 	return &AccrualWorker{
 		storage:  storage,
 		client:   client,

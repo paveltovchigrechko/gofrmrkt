@@ -16,6 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
+// --- mock storage (unchanged) ---
+
 type mockStorage struct {
 	mu sync.Mutex
 
@@ -71,84 +73,93 @@ func (m *mockStorage) GetWithdrawals(ctx context.Context, userID int64) ([]repo.
 }
 func (m *mockStorage) Close() error { return nil }
 
-func newTestWorker(storage repo.Storage, accrualBaseURL string) *AccrualWorker {
+// --- stub accrual client ---
+
+type stubAccrualClient struct {
+	getOrderInfoFn func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error)
+}
+
+func (s *stubAccrualClient) GetOrderInfo(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+	return s.getOrderInfoFn(ctx, orderNumber)
+}
+
+// neverCalledClient fails the test immediately if the worker ever queries
+// the accrual system — for scenarios where it shouldn't reach that far.
+func neverCalledClient(t *testing.T) *stubAccrualClient {
+	t.Helper()
+	return &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+			t.Fatalf("accrual client should not have been called, got order %q", orderNumber)
+			return nil, 0, nil
+		},
+	}
+}
+
+// mapAccrualClient dispatches by order number, failing the test on any
+// order it wasn't told to expect.
+func mapAccrualClient(t *testing.T, responses map[string]func() (*accrual.OrderInfo, time.Duration, error)) *stubAccrualClient {
+	t.Helper()
+	return &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+			respond, ok := responses[orderNumber]
+			if !ok {
+				t.Fatalf("unexpected accrual lookup for order %q", orderNumber)
+			}
+			return respond()
+		},
+	}
+}
+
+// --- test helper ---
+
+func newTestWorker(storage repo.Storage, client AccrualClient) *AccrualWorker {
 	return &AccrualWorker{
 		storage:  storage,
-		client:   accrual.NewClient(accrualBaseURL, zap.NewNop().Sugar()),
+		client:   client,
 		logger:   zap.NewNop().Sugar(),
 		interval: 10 * time.Millisecond,
 		batch:    10,
 	}
 }
 
-func pathAccrualServer(t *testing.T, responses map[string]func(w http.ResponseWriter)) *httptest.Server {
-	t.Helper()
-	var mu sync.Mutex
-	hit := map[string]bool{}
+func floatPtr(v float64) *float64 { return &v }
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		hit[r.URL.Path] = true
-		mu.Unlock()
-
-		respond, ok := responses[r.URL.Path]
-		if !ok {
-			t.Errorf("unexpected request to %s", r.URL.Path)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		respond(w)
-	}))
-
-	t.Cleanup(server.Close)
-	return server
-}
-
-func neverCalledServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("accrual system should not have been called, got request to %s", r.URL.Path)
-	}))
-	t.Cleanup(server.Close)
-	return server
-}
+// --- pollOnce ---
 
 func TestPollOnce_GetPendingOrdersError_NoClientCalls(t *testing.T) {
-	server := neverCalledServer(t)
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return nil, errors.New("db down")
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, neverCalledClient(t))
 
-	w.pollOnce(context.Background())
+	w.pollOnce(context.Background()) // must not panic, must not call the client
 }
 
 func TestPollOnce_NoPendingOrders_NoClientCalls(t *testing.T) {
-	server := neverCalledServer(t)
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return nil, nil
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, neverCalledClient(t))
 
 	w.pollOnce(context.Background())
 }
 
 func TestPollOnce_Processed_UpdatesStatusWithAccrual(t *testing.T) {
-	server := pathAccrualServer(t, map[string]func(w http.ResponseWriter){
-		"/api/orders/123": func(w http.ResponseWriter) {
-			w.Write([]byte(`{"order":"123","status":"PROCESSED","accrual":500}`))
+	client := &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+			return &accrual.OrderInfo{Order: "123", Status: "PROCESSED", Accrual: floatPtr(500)}, 0, nil
 		},
-	})
+	}
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return []repo.PendingOrder{{Number: "123", UserID: 1}}, nil
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, client)
 
 	w.pollOnce(context.Background())
 
@@ -161,17 +172,17 @@ func TestPollOnce_Processed_UpdatesStatusWithAccrual(t *testing.T) {
 }
 
 func TestPollOnce_Registered_MapsToProcessing(t *testing.T) {
-	server := pathAccrualServer(t, map[string]func(w http.ResponseWriter){
-		"/api/orders/123": func(w http.ResponseWriter) {
-			w.Write([]byte(`{"order":"123","status":"REGISTERED"}`))
+	client := &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+			return &accrual.OrderInfo{Order: "123", Status: "REGISTERED"}, 0, nil
 		},
-	})
+	}
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return []repo.PendingOrder{{Number: "123", UserID: 1}}, nil
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, client)
 
 	w.pollOnce(context.Background())
 
@@ -182,17 +193,17 @@ func TestPollOnce_Registered_MapsToProcessing(t *testing.T) {
 }
 
 func TestPollOnce_UnknownStatus_DoesNotUpdate(t *testing.T) {
-	server := pathAccrualServer(t, map[string]func(w http.ResponseWriter){
-		"/api/orders/123": func(w http.ResponseWriter) {
-			w.Write([]byte(`{"order":"123","status":"BOGUS"}`))
+	client := &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+			return &accrual.OrderInfo{Order: "123", Status: "BOGUS"}, 0, nil
 		},
-	})
+	}
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return []repo.PendingOrder{{Number: "123", UserID: 1}}, nil
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, client)
 
 	w.pollOnce(context.Background())
 
@@ -200,17 +211,17 @@ func TestPollOnce_UnknownStatus_DoesNotUpdate(t *testing.T) {
 }
 
 func TestPollOnce_NotRegistered_DoesNotUpdate(t *testing.T) {
-	server := pathAccrualServer(t, map[string]func(w http.ResponseWriter){
-		"/api/orders/123": func(w http.ResponseWriter) {
-			w.WriteHeader(http.StatusNoContent)
+	client := &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+			return nil, 0, accrual.ErrOrderNotRegistered
 		},
-	})
+	}
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return []repo.PendingOrder{{Number: "123", UserID: 1}}, nil
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, client)
 
 	w.pollOnce(context.Background())
 
@@ -218,30 +229,30 @@ func TestPollOnce_NotRegistered_DoesNotUpdate(t *testing.T) {
 }
 
 func TestPollOnce_UpdateStatusError_DoesNotPanic(t *testing.T) {
-	server := pathAccrualServer(t, map[string]func(w http.ResponseWriter){
-		"/api/orders/123": func(w http.ResponseWriter) {
-			w.Write([]byte(`{"order":"123","status":"PROCESSED","accrual":100}`))
+	client := &stubAccrualClient{
+		getOrderInfoFn: func(ctx context.Context, orderNumber string) (*accrual.OrderInfo, time.Duration, error) {
+			return &accrual.OrderInfo{Order: "123", Status: "PROCESSED", Accrual: floatPtr(100)}, 0, nil
 		},
-	})
+	}
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return []repo.PendingOrder{{Number: "123", UserID: 1}}, nil
 		},
 		updateErr: errors.New("db write failed"),
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, client)
 
 	w.pollOnce(context.Background()) // just must not panic
 	assert.Len(t, storage.calls(), 1)
 }
 
 func TestPollOnce_MultipleOrders_ProcessesAllWhenNoRateLimit(t *testing.T) {
-	server := pathAccrualServer(t, map[string]func(w http.ResponseWriter){
-		"/api/orders/111": func(w http.ResponseWriter) {
-			w.Write([]byte(`{"order":"111","status":"PROCESSED","accrual":100}`))
+	client := mapAccrualClient(t, map[string]func() (*accrual.OrderInfo, time.Duration, error){
+		"111": func() (*accrual.OrderInfo, time.Duration, error) {
+			return &accrual.OrderInfo{Order: "111", Status: "PROCESSED", Accrual: floatPtr(100)}, 0, nil
 		},
-		"/api/orders/222": func(w http.ResponseWriter) {
-			w.Write([]byte(`{"order":"222","status":"INVALID"}`))
+		"222": func() (*accrual.OrderInfo, time.Duration, error) {
+			return &accrual.OrderInfo{Order: "222", Status: "INVALID"}, 0, nil
 		},
 	})
 	storage := &mockStorage{
@@ -249,7 +260,7 @@ func TestPollOnce_MultipleOrders_ProcessesAllWhenNoRateLimit(t *testing.T) {
 			return []repo.PendingOrder{{Number: "111"}, {Number: "222"}}, nil
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, client)
 
 	w.pollOnce(context.Background())
 
@@ -261,18 +272,21 @@ func TestPollOnce_MultipleOrders_ProcessesAllWhenNoRateLimit(t *testing.T) {
 }
 
 func TestPollOnce_RateLimited_StopsBatchAndReturnsEarlyOnCancellation(t *testing.T) {
-	server := pathAccrualServer(t, map[string]func(w http.ResponseWriter){
-		"/api/orders/111": func(w http.ResponseWriter) {
-			w.Header().Set("Retry-After", "10")
-			w.WriteHeader(http.StatusTooManyRequests)
+	// Retry-After is large (10s) to prove the test relies on context
+	// cancellation to return quickly, not on the wait completing.
+	client := mapAccrualClient(t, map[string]func() (*accrual.OrderInfo, time.Duration, error){
+		"111": func() (*accrual.OrderInfo, time.Duration, error) {
+			return nil, 10 * time.Second, accrual.ErrTooManyRequests
 		},
+		// "222" intentionally absent: mapAccrualClient fails the test if
+		// the worker ever queries it after the 429 on "111".
 	})
 	storage := &mockStorage{
 		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
 			return []repo.PendingOrder{{Number: "111"}, {Number: "222"}}, nil
 		},
 	}
-	w := newTestWorker(storage, server.URL)
+	w := newTestWorker(storage, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
@@ -281,9 +295,37 @@ func TestPollOnce_RateLimited_StopsBatchAndReturnsEarlyOnCancellation(t *testing
 	w.pollOnce(ctx)
 	elapsed := time.Since(start)
 
-	assert.Less(t, elapsed, 500*time.Millisecond, "pollOnce should return promptly on context cancellation, not wait out the full Retry-After")
-	assert.Empty(t, storage.calls(), "no order should have its status updated when rate-limited")
+	assert.Less(t, elapsed, 500*time.Millisecond, "pollOnce should return promptly on context cancellation")
+	assert.Empty(t, storage.calls())
 }
+
+// TestPollOnce_Integration_RealAccrualClient is the one test in this file
+// using the real *accrual.Client against a real httptest.Server — proving
+// the interface substitution above didn't silently break the true wiring,
+// which the stub-based tests above can't verify by themselves.
+func TestPollOnce_Integration_RealAccrualClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/orders/123", r.URL.Path)
+		w.Write([]byte(`{"order":"123","status":"PROCESSED","accrual":500}`))
+	}))
+	defer server.Close()
+
+	realClient := accrual.NewClient(server.URL, zap.NewNop().Sugar())
+	storage := &mockStorage{
+		getPendingOrdersFn: func(ctx context.Context, limit int) ([]repo.PendingOrder, error) {
+			return []repo.PendingOrder{{Number: "123", UserID: 1}}, nil
+		},
+	}
+	w := newTestWorker(storage, realClient)
+
+	w.pollOnce(context.Background())
+
+	calls := storage.calls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "PROCESSED", calls[0].status)
+}
+
+// --- Run ---
 
 func TestRun_PollsRepeatedlyUntilContextCanceled(t *testing.T) {
 	var mu sync.Mutex
@@ -300,7 +342,7 @@ func TestRun_PollsRepeatedlyUntilContextCanceled(t *testing.T) {
 
 	w := &AccrualWorker{
 		storage:  storage,
-		client:   accrual.NewClient("http://unused.invalid", zap.NewNop().Sugar()),
+		client:   neverCalledClient(t),
 		logger:   zap.NewNop().Sugar(),
 		interval: 10 * time.Millisecond,
 		batch:    10,
