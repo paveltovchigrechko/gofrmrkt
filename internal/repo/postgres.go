@@ -113,12 +113,18 @@ func (db *Postgres) GetUserByLogin(ctx context.Context, login string) (int64, st
 // --- orders ---
 
 func (db *Postgres) UploadOrder(ctx context.Context, userID int64, orderNumber string) error {
+	const savepoint = "upload_order_insert"
+
 	return retry.Do(ctx, isRetriableDBError, func() error {
 		tx, err := db.database.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback()
+
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepoint); err != nil {
+			return err
+		}
 
 		insertQuery := `
 			INSERT INTO orders (number, user_id)
@@ -131,6 +137,10 @@ func (db *Postgres) UploadOrder(ctx context.Context, userID int64, orderNumber s
 
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepoint); err != nil {
 			return err
 		}
 

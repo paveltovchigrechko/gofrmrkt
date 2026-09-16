@@ -98,6 +98,8 @@ func TestPostgres_UploadOrder_New(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -111,9 +113,13 @@ func TestPostgres_UploadOrder_SameUser(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(uniqueViolationErr())
+	mock.ExpectExec(regexp.QuoteMeta(`ROLLBACK TO SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT user_id FROM orders WHERE number = $1`)).
 		WithArgs("12345").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
@@ -127,9 +133,13 @@ func TestPostgres_UploadOrder_DifferentUser(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(2)).
 		WillReturnError(uniqueViolationErr())
+	mock.ExpectExec(regexp.QuoteMeta(`ROLLBACK TO SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT user_id FROM orders WHERE number = $1`)).
 		WithArgs("12345").
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
@@ -144,9 +154,13 @@ func TestPostgres_UploadOrder_OwnerLookupFails(t *testing.T) {
 
 	lookupErr := errors.New("lookup failed")
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(uniqueViolationErr())
+	mock.ExpectExec(regexp.QuoteMeta(`ROLLBACK TO SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT user_id FROM orders WHERE number = $1`)).
 		WithArgs("12345").
 		WillReturnError(lookupErr)
@@ -161,6 +175,8 @@ func TestPostgres_UploadOrder_OtherDBError(t *testing.T) {
 
 	dbErr := errors.New("connection reset")
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(dbErr)
@@ -594,12 +610,16 @@ func TestPostgres_UploadOrder_RetriesOnConnectionError_ThenSucceeds(t *testing.T
 	retriableErr := &pgconn.PgError{Code: "08006"}
 
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnError(retriableErr)
 	mock.ExpectRollback()
 
 	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
 		WithArgs("12345", int64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -608,6 +628,7 @@ func TestPostgres_UploadOrder_RetriesOnConnectionError_ThenSucceeds(t *testing.T
 	err := pg.UploadOrder(context.Background(), 1, "12345")
 	assert.NoError(t, err)
 }
+
 func TestPostgres_UpdateOrderStatus_RetriesOnConnectionError_ThenSucceeds(t *testing.T) {
 	pg, mock := newMockPostgres(t)
 	retriableErr := &pgconn.PgError{Code: "08006"}
