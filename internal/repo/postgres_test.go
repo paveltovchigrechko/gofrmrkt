@@ -644,3 +644,21 @@ func TestPostgres_UpdateOrderStatus_RetriesOnConnectionError_ThenSucceeds(t *tes
 	err := pg.UpdateOrderStatus(context.Background(), "12345", "PROCESSED", &accrual)
 	assert.NoError(t, err)
 }
+
+func TestPostgres_UploadOrder_RollbackToSavepointFails(t *testing.T) {
+	pg, mock := newMockPostgres(t)
+
+	rbErr := errors.New("connection lost")
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SAVEPOINT upload_order_insert`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO orders (number, user_id)`)).
+		WithArgs("12345", int64(1)).
+		WillReturnError(uniqueViolationErr())
+	mock.ExpectExec(regexp.QuoteMeta(`ROLLBACK TO SAVEPOINT upload_order_insert`)).
+		WillReturnError(rbErr)
+	mock.ExpectRollback()
+
+	err := pg.UploadOrder(context.Background(), 1, "12345")
+	assert.ErrorIs(t, err, rbErr)
+}
