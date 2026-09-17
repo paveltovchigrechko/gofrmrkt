@@ -76,16 +76,16 @@ func (w *AccrualWorker) pollOnce(ctx context.Context) {
 		return
 	}
 
-	jobs := make(chan repo.PendingOrder, len(orders))
-	for _, o := range orders {
-		jobs <- o
-	}
-	close(jobs)
-
 	poolSize := w.poolSize
 	if poolSize > len(orders) {
 		poolSize = len(orders)
 	}
+
+	jobs := make(chan repo.PendingOrder, poolSize)
+	for _, o := range orders {
+		jobs <- o
+	}
+	close(jobs)
 
 	var wg sync.WaitGroup
 	wg.Add(poolSize)
